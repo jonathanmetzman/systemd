@@ -1,0 +1,14 @@
+name: CIFuzz continuous builds
+on:
+  push:
+    branches:
+      - main
+jobs:
+  Build:
+   runs-on: ubuntu-latest
+   steps:
+   - name: Build Fuzzers
+     id: build
+     uses: google/clusterfuzzlite/actions/build_fuzzers@v1
+     with:
+       upload-build: true
