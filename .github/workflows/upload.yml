@@ -1,8 +1,15 @@
-steps:
-- uses: actions/checkout@v2
+name: Upload it
+on:
+  push:
+    branches:
+      - main
+jobs:
+  upload:
+    steps:
+      - uses: actions/checkout@v2
 
-- run: wget https://storage.googleapis.com/clusterfuzz-builds/systemd/systemd-address-202109271200.zip -O /tmp/k.zip && mkdir /tmp/k && cd /tmp/k && unzip /tmp/k.zip && cd /tmp && tar -cvf k.tar /tmp/k
-- uses: actions/upload-artifact@v2
-  with:
-    name: k
-    path: /tmp/k.tar
+      - run: wget https://storage.googleapis.com/clusterfuzz-builds/systemd/systemd-address-202109271200.zip -O /tmp/k.zip && mkdir /tmp/k && cd /tmp/k && unzip /tmp/k.zip && cd /tmp && tar -cvf k.tar /tmp/k
+      - uses: actions/upload-artifact@v2
+        with:
+          name: k
+          path: /tmp/k.tar
