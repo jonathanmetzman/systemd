@@ -12,3 +12,4 @@ jobs:
      uses: google/clusterfuzzlite/actions/build_fuzzers@v1
      with:
        upload-build: true
+       github-token: ${{ secrets.GITHUB_TOKEN }}
