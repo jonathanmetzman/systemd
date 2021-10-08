@@ -4,7 +4,7 @@ on:
     paths:
       - '**'
 jobs:
-  PR:
+  Fuzz:
     runs-on: ubuntu-latest
     steps:
     - name: Build Fuzzers
