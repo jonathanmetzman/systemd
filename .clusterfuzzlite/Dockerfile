@@ -20,6 +20,6 @@ RUN apt-get update &&\
         libcap-dev libmount-dev libkmod-dev \
         pkg-config wget &&\
     pip3 install meson ninja jinja2
-RUN git clone --depth 1 https://github.com/systemd/systemd systemd
+COPY . $SRC/systemd
 WORKDIR systemd
 COPY .clusterfuzzlite/build.sh $SRC/
