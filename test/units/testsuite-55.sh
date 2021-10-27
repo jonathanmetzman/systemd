@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
 set -eux
 set -o pipefail
 
@@ -38,7 +39,7 @@ systemctl start testsuite-55-testbloat.service
 
 # Verify systemd-oomd is monitoring the expected units
 oomctl | grep "/testsuite-55-workload.slice"
-oomctl | grep "1.00%"
+oomctl | grep "20.00%"
 oomctl | grep "Default Memory Pressure Duration: 2s"
 
 systemctl status testsuite-55-testchill.service
@@ -56,6 +57,39 @@ done
 # testbloat should be killed and testchill should be fine
 if systemctl status testsuite-55-testbloat.service; then exit 42; fi
 if ! systemctl status testsuite-55-testchill.service; then exit 24; fi
+
+# Make sure we also work correctly on user units.
+
+runas() {
+    declare userid=$1
+    shift
+    # shellcheck disable=SC2016
+    su "$userid" -s /bin/sh -c 'XDG_RUNTIME_DIR=/run/user/$UID exec "$@"' -- sh "$@"
+}
+
+runas testuser systemctl start --user testsuite-55-testchill.service
+runas testuser systemctl start --user testsuite-55-testbloat.service
+
+# Verify systemd-oomd is monitoring the expected units
+oomctl | grep -E "/user.slice.*/testsuite-55-workload.slice"
+oomctl | grep "20.00%"
+oomctl | grep "Default Memory Pressure Duration: 2s"
+
+runas testuser systemctl --user status testsuite-55-testchill.service
+
+# systemd-oomd watches for elevated pressure for 2 seconds before acting.
+# It can take time to build up pressure so either wait 2 minutes or for the service to fail.
+timeout="$(date -ud "2 minutes" +%s)"
+while [[ $(date -u +%s) -le $timeout ]]; do
+    if ! runas testuser systemctl --user status testsuite-55-testbloat.service; then
+        break
+    fi
+    sleep 2
+done
+
+# testbloat should be killed and testchill should be fine
+if runas testuser systemctl --user status testsuite-55-testbloat.service; then exit 42; fi
+if ! runas testuser systemctl --user status testsuite-55-testchill.service; then exit 24; fi
 
 # only run this portion of the test if we can set xattrs
 if setfattr -n user.xattr_test -v 1 /sys/fs/cgroup/; then
@@ -75,7 +109,7 @@ if setfattr -n user.xattr_test -v 1 /sys/fs/cgroup/; then
         if ! systemctl status testsuite-55-testmunch.service; then
             break
         fi
-        sleep 5
+        sleep 2
     done
 
     # testmunch should be killed since testbloat had the avoid xattr on it

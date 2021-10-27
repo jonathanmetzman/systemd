@@ -5,9 +5,9 @@
 #include <unistd.h>
 
 #include "alloc-util.h"
+#include "chase-symlinks.h"
 #include "fd-util.h"
 #include "fileio.h"
-#include "fs-util.h"
 #include "fstab-util.h"
 #include "generator.h"
 #include "log.h"
@@ -434,7 +434,8 @@ static int add_mount(
 
         /* Order the mount unit we generate relative to the post unit, so that DefaultDependencies= on the
          * target unit won't affect us. */
-        if (post && !FLAGS_SET(flags, MOUNT_AUTOMOUNT) && !FLAGS_SET(flags, MOUNT_NOAUTO))
+        if (post && !FLAGS_SET(flags, MOUNT_AUTOMOUNT) && !FLAGS_SET(flags, MOUNT_NOAUTO) &&
+            !FLAGS_SET(flags, MOUNT_NOFAIL))
                 fprintf(f, "Before=%s\n", post);
 
         if (passno != 0) {
@@ -451,6 +452,10 @@ static int add_mount(
                 "\n"
                 "[Mount]\n");
 
+        r = write_what(f, what);
+        if (r < 0)
+                return r;
+
         if (original_where)
                 fprintf(f, "# Canonicalized from %s\n", original_where);
 
@@ -458,10 +463,6 @@ static int add_mount(
         if (!where_escaped)
                 return log_oom();
         fprintf(f, "Where=%s\n", where_escaped);
-
-        r = write_what(f, what);
-        if (r < 0)
-                return r;
 
         if (!isempty(fstype) && !streq(fstype, "auto")) {
                 _cleanup_free_ char *t = NULL;

@@ -148,6 +148,8 @@ tests += [
 
         [['src/test/test-utf8.c']],
 
+        [['src/test/test-kbd-util.c']],
+
         [['src/test/test-blockdev-util.c']],
 
         [['src/test/test-dev-setup.c']],
@@ -162,6 +164,8 @@ tests += [
         [['src/test/test-locale-util.c']],
 
         [['src/test/test-copy.c']],
+
+        [['src/test/test-recurse-dir.c']],
 
         [['src/test/test-data-fd-util.c']],
 
@@ -187,6 +191,8 @@ tests += [
         [['src/test/test-ratelimit.c']],
 
         [['src/test/test-util.c']],
+
+        [['src/test/test-macro.c']],
 
         [['src/test/test-json.c']],
 
@@ -214,6 +220,8 @@ tests += [
         [['src/test/test-glob-util.c']],
 
         [['src/test/test-fs-util.c']],
+
+        [['src/test/test-install-file.c']],
 
         [['src/test/test-umask-util.c']],
 
@@ -250,6 +258,8 @@ tests += [
 
         [['src/test/test-sysctl-util.c']],
 
+        [['src/test/test-import-util.c']],
+
         [['src/test/test-user-record.c']],
 
         [['src/test/test-user-util.c']],
@@ -278,6 +288,8 @@ tests += [
         [['src/test/test-socket-netlink.c']],
 
         [['src/test/test-in-addr-util.c']],
+
+        [['src/test/test-in-addr-prefix-util.c']],
 
         [['src/test/test-barrier.c']],
 
@@ -349,6 +361,17 @@ tests += [
          [],
          core_includes],
 
+        [['src/test/test-bpf-lsm.c'],
+         [libcore,
+          libshared],
+         [libmount,
+          threads,
+          librt,
+          libseccomp,
+          libselinux,
+          libblkid],
+         core_includes],
+
         [['src/test/test-watch-pid.c'],
          [libcore,
           libshared],
@@ -363,7 +386,7 @@ tests += [
         [['src/test/test-hashmap.c',
           'src/test/test-hashmap-plain.c',
           test_hashmap_ordered_c],
-         [], [], [], '', 'timeout=90'],
+         [], [], [], '', 'timeout=180'],
 
         [['src/test/test-set.c'],
          [libbasic]],
@@ -420,6 +443,8 @@ tests += [
          [], [], [], '', 'manual'],
 
         [['src/test/test-firewall-util.c']],
+
+        [['src/test/test-net-naming-scheme.c']],
 
         [['src/test/test-netlink-manual.c'],
          [],
@@ -567,8 +592,6 @@ tests += [
 
         [['src/test/test-id128.c']],
 
-        [['src/test/test-hash.c']],
-
         [['src/test/test-gcrypt-util.c'],
          [], [], [], 'HAVE_GCRYPT'],
 
@@ -604,6 +627,8 @@ tests += [
 
         [['src/test/test-nscd-flush.c'],
          [], [], [], 'ENABLE_NSCD', 'manual'],
+
+        [['src/test/test-hmac.c']],
 ]
 
 ############################################################

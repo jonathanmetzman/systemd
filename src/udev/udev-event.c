@@ -30,6 +30,7 @@
 #include "strxcpyx.h"
 #include "udev-builtin.h"
 #include "udev-event.h"
+#include "udev-netlink.h"
 #include "udev-node.h"
 #include "udev-util.h"
 #include "udev-watch.h"
@@ -222,7 +223,7 @@ static int safe_atou_optional_plus(const char *s, unsigned *ret) {
 
         p = endswith(s, "+");
         if (p)
-                s = strndupa(s, p - s);
+                s = strndupa_safe(s, p - s);
 
         r = safe_atou(s, ret);
         if (r < 0)
@@ -351,11 +352,11 @@ static ssize_t udev_event_subst_format(
 
                 /* try to read the attribute the device */
                 if (!val)
-                        (void) sd_device_get_sysattr_value(dev, attr, &val);
+                        (void) device_get_sysattr_value_maybe_from_netlink(dev, &event->rtnl, attr, &val);
 
                 /* try to read the attribute of the parent device, other matches have selected */
                 if (!val && event->dev_parent && event->dev_parent != dev)
-                        (void) sd_device_get_sysattr_value(event->dev_parent, attr, &val);
+                        (void) device_get_sysattr_value_maybe_from_netlink(event->dev_parent, &event->rtnl, attr, &val);
 
                 if (!val)
                         goto null_terminate;
@@ -429,7 +430,7 @@ static ssize_t udev_event_subst_format(
                 strpcpy(&s, l, val);
                 break;
         default:
-                assert_not_reached("Unknown format substitution type");
+                assert_not_reached();
         }
 
         return s - dest;
@@ -826,6 +827,7 @@ int udev_event_spawn(UdevEvent *event,
 static int rename_netif(UdevEvent *event) {
         sd_device *dev = event->dev;
         const char *oldname;
+        unsigned flags;
         int ifindex, r;
 
         if (!event->name)
@@ -850,6 +852,16 @@ static int rename_netif(UdevEvent *event) {
         if (naming_scheme_has(NAMING_REPLACE_STRICTLY) &&
             !ifname_valid(event->name)) {
                 log_device_warning(dev, "Invalid network interface name, ignoring: %s", event->name);
+                return 0;
+        }
+
+        r = rtnl_get_link_info(&event->rtnl, ifindex, NULL, &flags);
+        if (r < 0)
+                return log_device_warning_errno(dev, r, "Failed to get link flags: %m");
+
+        if (FLAGS_SET(flags, IFF_UP)) {
+                log_device_info(dev, "Network interface '%s' is already up, refusing to rename to '%s'.",
+                                oldname, event->name);
                 return 0;
         }
 
@@ -893,9 +905,6 @@ static int update_devnode(UdevEvent *event) {
         if (r < 0)
                 return log_device_error_errno(dev, r, "Failed to get devnum: %m");
 
-        /* remove/update possible left-over symlinks from old database entry */
-        (void) udev_node_update_old_links(dev, event->dev_db_clone);
-
         if (!uid_is_valid(event->uid)) {
                 r = device_get_devnode_uid(dev, &event->uid);
                 if (r < 0 && r != -ENOENT)
@@ -919,7 +928,11 @@ static int update_devnode(UdevEvent *event) {
 
         bool apply_mac = device_for_action(dev, SD_DEVICE_ADD);
 
-        return udev_node_add(dev, apply_mac, event->mode, event->uid, event->gid, event->seclabel_list);
+        r = udev_node_apply_permissions(dev, apply_mac, event->mode, event->uid, event->gid, event->seclabel_list);
+        if (r < 0)
+                return log_device_error_errno(dev, r, "Failed to apply devnode permissions: %m");
+
+        return udev_node_update(dev, event->dev_db_clone);
 }
 
 static int event_execute_rules_on_remove(
@@ -1057,10 +1070,7 @@ int udev_event_execute_rules(
 
         device_set_is_initialized(dev);
 
-        /* Yes, we run update_devnode() twice, because in the first invocation, that is before update of udev database,
-         * it could happen that two contenders are replacing each other's symlink. Hence we run it again to make sure
-         * symlinks point to devices that claim them with the highest priority. */
-        return update_devnode(event);
+        return 0;
 }
 
 void udev_event_execute_run(UdevEvent *event, usec_t timeout_usec, int timeout_signal) {
@@ -1073,7 +1083,7 @@ void udev_event_execute_run(UdevEvent *event, usec_t timeout_usec, int timeout_s
 
                 if (builtin_cmd != _UDEV_BUILTIN_INVALID) {
                         log_device_debug(event->dev, "Running built-in command \"%s\"", command);
-                        r = udev_builtin_run(event->dev, builtin_cmd, command, false);
+                        r = udev_builtin_run(event->dev, &event->rtnl, builtin_cmd, command, false);
                         if (r < 0)
                                 log_device_debug_errno(event->dev, r, "Failed to run built-in command \"%s\", ignoring: %m", command);
                 } else {

@@ -14,6 +14,7 @@
 
 #include "alloc-util.h"
 #include "btrfs-util.h"
+#include "chase-symlinks.h"
 #include "chattr-util.h"
 #include "copy.h"
 #include "dirent-util.h"
@@ -305,7 +306,7 @@ static int image_make(
                 }
 
                 /* Get directory creation time (not available everywhere, but that's OK */
-                (void) fd_getcrtime(dfd, &crtime);
+                (void) fd_getcrtime(fd, &crtime);
 
                 /* If the IMMUTABLE bit is set, we consider the directory read-only. Since the ioctl is not
                  * supported everywhere we ignore failures. */
@@ -333,7 +334,7 @@ static int image_make(
                 if (!ret)
                         return 0;
 
-                (void) fd_getcrtime_at(dfd, filename, &crtime, 0);
+                (void) fd_getcrtime_at(dfd, filename, AT_SYMLINK_FOLLOW, &crtime);
 
                 if (!pretty) {
                         r = extract_pretty(filename, ".raw", &pretty_buffer);
@@ -1203,6 +1204,7 @@ int image_read_metadata(Image *i) {
                 r = dissect_image(
                                 d->fd,
                                 NULL, NULL,
+                                d->diskseq,
                                 d->uevent_seqnum_not_before,
                                 d->timestamp_not_before,
                                 DISSECT_IMAGE_GENERIC_ROOT |

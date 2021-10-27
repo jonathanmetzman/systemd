@@ -10,6 +10,7 @@
 #include "bus-locator.h"
 #include "bus-map-properties.h"
 #include "bus-unit-util.h"
+#include "chase-symlinks.h"
 #include "dropin.h"
 #include "env-util.h"
 #include "exit-status.h"
@@ -930,6 +931,6 @@ int halt_now(enum action a) {
                                              (arg_dry_run ? REBOOT_DRY_RUN : 0));
 
         default:
-                assert_not_reached("Unknown action.");
+                assert_not_reached();
         }
 }

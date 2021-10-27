@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "bus-unit-procs.h"
+#include "glyph-util.h"
 #include "hashmap.h"
 #include "list.h"
-#include "locale-util.h"
 #include "macro.h"
 #include "path-util.h"
 #include "process-util.h"
@@ -46,7 +46,7 @@ static int add_cgroup(Hashmap *cgroups, const char *path, bool is_const, struct 
                 if (!e)
                         return -EINVAL;
 
-                pp = strndupa(path, e - path);
+                pp = strndupa_safe(path, e - path);
 
                 r = add_cgroup(cgroups, pp, false, &parent);
                 if (r < 0)

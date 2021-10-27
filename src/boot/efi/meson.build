@@ -2,21 +2,25 @@
 
 efi_headers = files('''
         console.h
-        crc32.h
+        cpio.h
+        devicetree.h
         disk.h
+        drivers.h
         graphics.h
         linux.h
         measure.h
         missing_efi.h
         pe.h
         random-seed.h
-        sha256.h
         shim.h
         splash.h
         util.h
+        xbootldr.h
 '''.split())
 
 common_sources = '''
+        assert.c
+        devicetree.c
         disk.c
         graphics.c
         measure.c
@@ -28,16 +32,17 @@ common_sources = '''
 systemd_boot_sources = '''
         boot.c
         console.c
-        crc32.c
+        drivers.c
         random-seed.c
-        sha256.c
         shim.c
+        xbootldr.c
 '''.split()
 
 stub_sources = '''
-        linux.c
+        initrd.c
         splash.c
         stub.c
+        cpio.c
 '''.split()
 
 if conf.get('ENABLE_EFI') == 1 and get_option('gnu-efi') != 'false'
@@ -88,6 +93,14 @@ if conf.get('ENABLE_EFI') == 1 and get_option('gnu-efi') != 'false'
         endif
 
         have_gnu_efi = gnu_efi_path_arch != '' and efi_libdir != ''
+
+        if have_gnu_efi and not cc.has_header_symbol('efi.h', 'EFI_IMAGE_MACHINE_X64',
+           include_directories: include_directories(efi_incdir, efi_incdir / gnu_efi_path_arch))
+                have_gnu_efi = false
+                if get_option('gnu-efi') == 'true'
+                        error('gnu-efi support requested, but found headers are too old (3.0.5+ required)')
+                endif
+        endif
 else
         have_gnu_efi = false
 endif
@@ -100,7 +113,13 @@ if have_gnu_efi
         efi_conf = configuration_data()
         efi_conf.set_quoted('EFI_MACHINE_TYPE_NAME', EFI_MACHINE_TYPE_NAME)
         efi_conf.set10('ENABLE_TPM', get_option('tpm'))
-        efi_conf.set('SD_TPM_PCR', get_option('tpm-pcrindex'))
+
+        foreach ctype : ['color-normal', 'color-entry', 'color-highlight', 'color-edit']
+                c = get_option('efi-' + ctype).split(',')
+                fg = 'EFI_' + c[0].strip().underscorify().to_upper()
+                bg = 'EFI_BACKGROUND_' + c[1].strip().underscorify().to_upper()
+                efi_conf.set(ctype.underscorify().to_upper(), '(' + fg + '|' + bg + ')')
+        endforeach
 
         if get_option('sbat-distro') != ''
                 efi_conf.set_quoted('SBAT_PROJECT', meson.project_name())
@@ -194,15 +213,19 @@ if have_gnu_efi
                 '-isystem', efi_incdir / gnu_efi_path_arch,
                 '-I', fundamental_path,
                 '-DSD_BOOT',
+                '-DGNU_EFI_USE_MS_ABI',
                 '-include', efi_config_h,
                 '-include', version_h,
         ]
+        if ['ia32', 'x86_64'].contains(efi_arch)
+                stub_sources += 'linux_x86.c'
+        else
+                stub_sources += 'linux.c'
+        endif
         if efi_arch == 'x86_64'
                 compile_args += ['-mno-red-zone',
                                  '-mno-sse',
-                                 '-mno-mmx',
-                                 '-DEFI_FUNCTION_WRAPPER',
-                                 '-DGNU_EFI_USE_MS_ABI']
+                                 '-mno-mmx']
         elif efi_arch == 'ia32'
                 compile_args += ['-mno-sse',
                                  '-mno-mmx']
@@ -219,11 +242,15 @@ if have_gnu_efi
                 compile_args += ['-Werror']
         endif
         if get_option('buildtype') == 'debug'
-                compile_args += ['-ggdb', '-O0']
+                compile_args += ['-ggdb', '-O0', '-DEFI_DEBUG']
         elif get_option('buildtype') == 'debugoptimized'
-                compile_args += ['-ggdb', '-Og']
+                compile_args += ['-ggdb', '-Og', '-DEFI_DEBUG']
         else
                 compile_args += ['-O2']
+        endif
+        if get_option('b_ndebug') == 'true' or (
+           get_option('b_ndebug') == 'if-release' and ['plain', 'release'].contains(get_option('buildtype')))
+                compile_args += ['-DNDEBUG']
         endif
 
         efi_ldflags = ['-T', efi_lds,
@@ -287,6 +314,7 @@ if have_gnu_efi
                                    '-j', '.text',
                                    '-j', '.sdata',
                                    '-j', '.sbat',
+                                   '-j', '.sdmagic',
                                    '-j', '.data',
                                    '-j', '.dynamic',
                                    '-j', '.dynsym',

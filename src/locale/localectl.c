@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <ftw.h>
 #include <getopt.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -293,7 +292,7 @@ static int list_x11_keymaps(int argc, char **argv, void *userdata) {
         else if (streq(argv[0], "list-x11-keymap-options"))
                 look_for = OPTIONS;
         else
-                assert_not_reached("Wrong parameter");
+                assert_not_reached();
 
         for (;;) {
                 _cleanup_free_ char *line = NULL;
@@ -474,7 +473,7 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
 
         return 1;

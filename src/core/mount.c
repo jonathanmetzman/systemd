@@ -1167,12 +1167,6 @@ static int mount_start(Unit *u) {
 
         assert(IN_SET(m->state, MOUNT_DEAD, MOUNT_FAILED));
 
-        r = unit_test_start_limit(u);
-        if (r < 0) {
-                mount_enter_dead(m, MOUNT_FAILURE_START_LIMIT_HIT);
-                return r;
-        }
-
         r = unit_acquire_invocation_id(u);
         if (r < 0)
                 return r;
@@ -1223,7 +1217,7 @@ static int mount_stop(Unit *u) {
                 return 0;
 
         default:
-                assert_not_reached("Unexpected state.");
+                assert_not_reached();
         }
 }
 
@@ -1383,7 +1377,7 @@ static void mount_sigchld_event(Unit *u, pid_t pid, int code, int status) {
         else if (code == CLD_DUMPED)
                 f = MOUNT_FAILURE_CORE_DUMP;
         else
-                assert_not_reached("Unknown code");
+                assert_not_reached();
 
         if (IN_SET(m->state, MOUNT_REMOUNTING, MOUNT_REMOUNTING_SIGKILL, MOUNT_REMOUNTING_SIGTERM))
                 mount_set_reload_result(m, f);
@@ -1465,7 +1459,7 @@ static void mount_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                 break;
 
         default:
-                assert_not_reached("Uh, control process died at wrong time.");
+                assert_not_reached();
         }
 
         /* Notify clients about changed exit status */
@@ -1541,7 +1535,7 @@ static int mount_dispatch_timer(sd_event_source *source, usec_t usec, void *user
                 break;
 
         default:
-                assert_not_reached("Timeout at wrong time.");
+                assert_not_reached();
         }
 
         return 0;
@@ -1578,6 +1572,10 @@ static int mount_setup_new_unit(
                 return r;
 
         r = update_parameters_proc_self_mountinfo(MOUNT(u), what, options, fstype);
+        if (r < 0)
+                return r;
+
+        r = mount_add_non_exec_dependencies(MOUNT(u));
         if (r < 0)
                 return r;
 
@@ -2138,6 +2136,21 @@ static int mount_can_clean(Unit *u, ExecCleanMask *ret) {
         return exec_context_get_clean_mask(&m->exec_context, ret);
 }
 
+static int mount_test_start_limit(Unit *u) {
+        Mount *m = MOUNT(u);
+        int r;
+
+        assert(m);
+
+        r = unit_test_start_limit(u);
+        if (r < 0) {
+                mount_enter_dead(m, MOUNT_FAILURE_START_LIMIT_HIT);
+                return r;
+        }
+
+        return 0;
+}
+
 static const char* const mount_exec_command_table[_MOUNT_EXEC_COMMAND_MAX] = {
         [MOUNT_EXEC_MOUNT]   = "ExecMount",
         [MOUNT_EXEC_UNMOUNT] = "ExecUnmount",
@@ -2235,4 +2248,6 @@ const UnitVTable mount_vtable = {
                         [JOB_TIMEOUT]    = "Timed out unmounting %s.",
                 },
         },
+
+        .test_start_limit = mount_test_start_limit,
 };

@@ -299,6 +299,8 @@ int get_credential_host_secret(CredentialSecretFlags flags, void **ret, size_t *
                         if (ret) {
                                 void *copy;
 
+                                assert(sz <= sizeof(f->data)); /* Ensure we don't read past f->data bounds */
+
                                 copy = memdup(f->data, sz);
                                 if (!copy)
                                         return -ENOMEM;
@@ -369,7 +371,10 @@ struct _packed_ encrypted_credential_header {
 };
 
 struct _packed_ tpm2_credential_header {
-        le64_t pcr_mask;
+        le64_t pcr_mask;    /* Note that the spec for PC Clients only mandates 24 PCRs, and that's what systems
+                             * generally have. But keep the door open for more. */
+        le16_t pcr_bank;    /* For now, either TPM2_ALG_SHA256 or TPM2_ALG_SHA1 */
+        le16_t primary_alg; /* Primary key algorithm (either TPM2_ALG_RSA or TPM2_ALG_ECC for now) */
         le32_t blob_size;
         le32_t policy_hash_size;
         uint8_t policy_hash_and_blob[];
@@ -396,7 +401,8 @@ static int sha256_hash_host_and_tpm2_key(
                 size_t tpm2_key_size,
                 uint8_t ret[static SHA256_DIGEST_LENGTH]) {
 
-        SHA256_CTX sha256_context;
+        _cleanup_(EVP_MD_CTX_freep) EVP_MD_CTX *md = NULL;
+        unsigned l;
 
         assert(host_key_size == 0 || host_key);
         assert(tpm2_key_size == 0 || tpm2_key);
@@ -404,18 +410,25 @@ static int sha256_hash_host_and_tpm2_key(
 
         /* Combines the host key and the TPM2 HMAC hash into a SHA256 hash value we'll use as symmetric encryption key. */
 
-        if (SHA256_Init(&sha256_context) != 1)
+        md = EVP_MD_CTX_new();
+        if (!md)
+                return log_oom();
+
+        if (EVP_DigestInit_ex(md, EVP_sha256(), NULL) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Failed to initial SHA256 context.");
 
-        if (host_key && SHA256_Update(&sha256_context, host_key, host_key_size) != 1)
+        if (host_key && EVP_DigestUpdate(md, host_key, host_key_size) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Failed to hash host key.");
 
-        if (tpm2_key && SHA256_Update(&sha256_context, tpm2_key, tpm2_key_size) != 1)
+        if (tpm2_key && EVP_DigestUpdate(md, tpm2_key, tpm2_key_size) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Failed to hash TPM2 key.");
 
-        if (SHA256_Final(ret, &sha256_context) != 1)
+        assert(EVP_MD_CTX_size(md) == SHA256_DIGEST_LENGTH);
+
+        if (EVP_DigestFinal_ex(md, ret, &l) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Failed to finalize SHA256 hash.");
 
+        assert(l == SHA256_DIGEST_LENGTH);
         return 0;
 }
 
@@ -436,6 +449,7 @@ int encrypt_credential_and_warn(
         size_t host_key_size = 0, tpm2_key_size = 0, tpm2_blob_size = 0, tpm2_policy_hash_size = 0, output_size, p, ml;
         _cleanup_free_ void *tpm2_blob = NULL, *tpm2_policy_hash = NULL, *iv = NULL, *output = NULL;
         _cleanup_free_ struct metadata_credential_header *m = NULL;
+        uint16_t tpm2_pcr_bank = 0, tpm2_primary_alg = 0;
         struct encrypted_credential_header *h;
         int ksz, bsz, ivsz, tsz, added, r;
         uint8_t md[SHA256_DIGEST_LENGTH];
@@ -505,7 +519,9 @@ int encrypt_credential_and_warn(
                               &tpm2_blob,
                               &tpm2_blob_size,
                               &tpm2_policy_hash,
-                              &tpm2_policy_hash_size);
+                              &tpm2_policy_hash_size,
+                              &tpm2_pcr_bank,
+                              &tpm2_primary_alg);
                 if (r < 0) {
                         if (!sd_id128_is_null(with_key))
                                 return r;
@@ -598,6 +614,8 @@ int encrypt_credential_and_warn(
 
                 t = (struct tpm2_credential_header*) ((uint8_t*) output + p);
                 t->pcr_mask = htole64(tpm2_pcr_mask);
+                t->pcr_bank = htole16(tpm2_pcr_bank);
+                t->primary_alg = htole16(tpm2_primary_alg);
                 t->blob_size = htole32(tpm2_blob_size);
                 t->policy_hash_size = htole32(tpm2_policy_hash_size);
                 memcpy(t->policy_hash_and_blob, tpm2_blob, tpm2_blob_size);
@@ -659,11 +677,11 @@ int encrypt_credential_and_warn(
         p += tsz;
         assert(p <= output_size);
 
-        if (DEBUG_LOGGING) {
+        if (DEBUG_LOGGING && input_size > 0) {
                 size_t base64_size;
 
                 base64_size = DIV_ROUND_UP(p * 4, 3); /* Include base64 size increase in debug output */
-
+                assert(base64_size >= input_size);
                 log_debug("Input of %zu bytes grew to output of %zu bytes (+%2zu%%).", input_size, base64_size, base64_size * 100 / input_size - 100);
         }
 
@@ -739,6 +757,10 @@ int decrypt_credential_and_warn(
 
                 if (le64toh(t->pcr_mask) >= (UINT64_C(1) << TPM2_PCRS_MAX))
                         return log_error_errno(SYNTHETIC_ERRNO(EBADMSG), "TPM2 PCR mask out of range.");
+                if (!tpm2_pcr_bank_to_string(le16toh(t->pcr_bank)))
+                        return log_error_errno(SYNTHETIC_ERRNO(EBADMSG), "TPM2 PCR bank invalid or not supported");
+                if (!tpm2_primary_alg_to_string(le16toh(t->primary_alg)))
+                        return log_error_errno(SYNTHETIC_ERRNO(EBADMSG), "TPM2 primary key algorithm invalid or not supported.");
                 if (le32toh(t->blob_size) > CREDENTIAL_FIELD_SIZE_MAX)
                         return log_error_errno(SYNTHETIC_ERRNO(EBADMSG), "Unexpected TPM2 blob size.");
                 if (le32toh(t->policy_hash_size) > CREDENTIAL_FIELD_SIZE_MAX)
@@ -755,6 +777,8 @@ int decrypt_credential_and_warn(
 
                 r = tpm2_unseal(tpm2_device,
                                 le64toh(t->pcr_mask),
+                                le16toh(t->pcr_bank),
+                                le16toh(t->primary_alg),
                                 t->policy_hash_and_blob,
                                 le32toh(t->blob_size),
                                 t->policy_hash_and_blob + le32toh(t->blob_size),

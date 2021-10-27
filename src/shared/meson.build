@@ -151,7 +151,11 @@ shared_sources = files('''
         ima-util.h
         import-util.c
         import-util.h
+        in-addr-prefix-util.c
+        in-addr-prefix-util.h
         initreq.h
+        install-file.c
+        install-file.h
         install-printf.c
         install-printf.h
         install.c
@@ -299,6 +303,8 @@ shared_sources = files('''
         utmp-wtmp.h
         varlink.c
         varlink.h
+        verb-log-control.c
+        verb-log-control.h
         verbs.c
         verbs.h
         vlan-util.c

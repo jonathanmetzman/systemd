@@ -33,6 +33,8 @@ if install_tests
                        install_dir : testdata_dir)
         install_subdir('testsuite-52.units',
                        install_dir : testdata_dir)
+        install_subdir('testsuite-63.units',
+                       install_dir : testdata_dir)
 
         testsuite08_dir = testdata_dir + '/testsuite-08.units'
         install_data('testsuite-08.units/-.mount',
@@ -98,9 +100,12 @@ if install_tests
         install_data('run-unit-tests.py',
                      install_mode : 'rwxr-xr-x',
                      install_dir : testsdir)
-        install_data('test-network-generator-conversion.sh',
-                     install_mode : 'rwxr-xr-x',
-                     install_dir : testsdir)
+
+        if conf.get('ENABLE_NETWORKD') == 1
+                install_data('test-network-generator-conversion.sh',
+                             install_mode : 'rwxr-xr-x',
+                             install_dir : testsdir)
+        endif
 endif
 
 ############################################################

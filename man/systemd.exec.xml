@@ -90,6 +90,20 @@
     <variablelist class='unit-directives'>
 
       <varlistentry>
+        <term><varname>ExecSearchPath=</varname></term>
+
+        <listitem><para>Takes a colon separated list of absolute paths relative to which the executable
+        used by the <varname>Exec*=</varname> (e.g. <varname>ExecStart=</varname>,
+        <varname>ExecStop=</varname>, etc.) properties can be found. <varname>ExecSearchPath=</varname>
+        overrides <varname>$PATH</varname> if <varname>$PATH</varname> is not supplied by the user through
+        <varname>Environment=</varname>, <varname>EnvironmentFile=</varname> or
+        <varname>PassEnvironment=</varname>. Assigning an empty string removes previous assignments
+        and setting <varname>ExecSearchPath=</varname> to a value multiple times will append
+        to the previous setting.
+        </para></listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><varname>WorkingDirectory=</varname></term>
 
         <listitem><para>Takes a directory path relative to the service's root directory specified by
@@ -427,6 +441,11 @@
         <para>These settings may be used more than once, each usage appends to the unit's list of image
         paths. If the empty string is assigned, the entire list of mount paths defined prior to this is
         reset.</para>
+
+        <para>Each image must carry a <filename>/usr/lib/extension-release.d/extension-release.IMAGE</filename>
+        file, with the appropriate metadata which matches <varname>RootImage=</varname>/<varname>RootDirectory=</varname>
+        or the host. See:
+        <citerefentry><refentrytitle>os-release</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para>
 
         <para>When <varname>DevicePolicy=</varname> is set to <literal>closed</literal> or
         <literal>strict</literal>, or set to <literal>auto</literal> and <varname>DeviceAllow=</varname> is
@@ -1507,33 +1526,40 @@ BindReadOnlyPaths=/var/lib/systemd</programlisting>
       <varlistentry>
         <term><varname>PrivateDevices=</varname></term>
 
-        <listitem><para>Takes a boolean argument. If true, sets up a new <filename>/dev/</filename> mount for the
-        executed processes and only adds API pseudo devices such as <filename>/dev/null</filename>,
-        <filename>/dev/zero</filename> or <filename>/dev/random</filename> (as well as the pseudo TTY subsystem) to it,
-        but no physical devices such as <filename>/dev/sda</filename>, system memory <filename>/dev/mem</filename>,
-        system ports <filename>/dev/port</filename> and others. This is useful to securely turn off physical device
-        access by the executed process. Defaults to false. Enabling this option will install a system call filter to
-        block low-level I/O system calls that are grouped in the <varname>@raw-io</varname> set, will also remove
-        <constant>CAP_MKNOD</constant> and <constant>CAP_SYS_RAWIO</constant> from the capability bounding set for the
-        unit (see above), and set <varname>DevicePolicy=closed</varname> (see
+        <listitem><para>Takes a boolean argument. If true, sets up a new <filename>/dev/</filename> mount for
+        the executed processes and only adds API pseudo devices such as <filename>/dev/null</filename>,
+        <filename>/dev/zero</filename> or <filename>/dev/random</filename> (as well as the pseudo TTY
+        subsystem) to it, but no physical devices such as <filename>/dev/sda</filename>, system memory
+        <filename>/dev/mem</filename>, system ports <filename>/dev/port</filename> and others. This is useful
+        to turn off physical device access by the executed process. Defaults to false.</para>
+
+        <para>Enabling this option will install a system call filter to block low-level I/O system calls that
+        are grouped in the <varname>@raw-io</varname> set, remove <constant>CAP_MKNOD</constant> and
+        <constant>CAP_SYS_RAWIO</constant> from the capability bounding set for the unit, and set
+        <varname>DevicePolicy=closed</varname> (see
         <citerefentry><refentrytitle>systemd.resource-control</refentrytitle><manvolnum>5</manvolnum></citerefentry>
-        for details). Note that using this setting will disconnect propagation of mounts from the service to the host
-        (propagation in the opposite direction continues to work). This means that this setting may not be used for
-        services which shall be able to install mount points in the main mount namespace. The new
-        <filename>/dev/</filename> will be mounted read-only and 'noexec'. The latter may break old programs which try
-        to set up executable memory by using
+        for details). Note that using this setting will disconnect propagation of mounts from the service to
+        the host (propagation in the opposite direction continues to work). This means that this setting may
+        not be used for services which shall be able to install mount points in the main mount namespace. The
+        new <filename>/dev/</filename> will be mounted read-only and 'noexec'. The latter may break old
+        programs which try to set up executable memory by using
         <citerefentry><refentrytitle>mmap</refentrytitle><manvolnum>2</manvolnum></citerefentry> of
-        <filename>/dev/zero</filename> instead of using <constant>MAP_ANON</constant>. For this setting the same
-        restrictions regarding mount propagation and privileges apply as for <varname>ReadOnlyPaths=</varname> and
-        related calls, see above. If turned on and if running in user mode, or in system mode, but without the
-        <constant>CAP_SYS_ADMIN</constant> capability (e.g. setting <varname>User=</varname>),
-        <varname>NoNewPrivileges=yes</varname> is implied.</para>
+        <filename>/dev/zero</filename> instead of using <constant>MAP_ANON</constant>. For this setting the
+        same restrictions regarding mount propagation and privileges apply as for
+        <varname>ReadOnlyPaths=</varname> and related calls, see above. If turned on and if running in user
+        mode, or in system mode, but without the <constant>CAP_SYS_ADMIN</constant> capability (e.g. setting
+        <varname>User=</varname>), <varname>NoNewPrivileges=yes</varname> is implied.</para>
 
-        <para>Note that the implementation of this setting might be impossible (for example if mount namespaces are not
-        available), and the unit should be written in a way that does not solely rely on this setting for
-        security.</para>
+        <para>Note that the implementation of this setting might be impossible (for example if mount
+        namespaces are not available), and the unit should be written in a way that does not solely rely on
+        this setting for security.</para>
 
-        <xi:include href="system-only.xml" xpointer="singular"/></listitem>
+        <xi:include href="system-only.xml" xpointer="singular"/>
+
+        <para>When access to some but not all devices must be possible, the <varname>DeviceAllow=</varname>
+        setting might be used instead. See
+        <citerefentry><refentrytitle>systemd.resource-control</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+        </para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -1814,6 +1840,100 @@ BindReadOnlyPaths=/var/lib/systemd</programlisting>
         used for local communication, including for
         <citerefentry><refentrytitle>syslog</refentrytitle><manvolnum>2</manvolnum></citerefentry>
         logging.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>RestrictFileSystems=</varname></term>
+
+        <listitem><para>Restricts the set of filesystems processes of this unit can open files on. Takes a space-separated
+        list of filesystem names. Any filesystem listed is made accessible to the unit's processes, access to filesystem
+        types not listed is prohibited (allow-listing). If the first character of the list is <literal>~</literal>, the
+        effect is inverted: access to the filesystems listed is prohibited (deny-listing). If the empty string is assigned,
+        access to filesystems is not restricted.</para>
+
+        <para>If you specify both types of this option (i.e. allow-listing and deny-listing), the first encountered will take
+        precedence and will dictate the default action (allow access to the filesystem or deny it). Then the next occurrences
+        of this option will add or delete the listed filesystems from the set of the restricted filesystems, depending on its
+        type and the default action.</para>
+
+        <para>Example: if a unit has the following,
+        <programlisting>RestrictFileSystems=ext4 tmpfs
+RestrictFileSystems=ext2 ext4</programlisting>
+        then access to <constant>ext4</constant>, <constant>tmpfs</constant>, and <constant>ext2</constant> is allowed
+        and access to other filesystems is denied.</para>
+
+        <para>Example: if a unit has the following,
+        <programlisting>RestrictFileSystems=ext4 tmpfs
+RestrictFileSystems=~ext4</programlisting>
+        then only access <constant>tmpfs</constant> is allowed.</para>
+
+        <para>Example: if a unit has the following,
+        <programlisting>RestrictFileSystems=~ext4 tmpfs
+RestrictFileSystems=ext4</programlisting>
+        then only access to <constant>tmpfs</constant> is denied.</para>
+
+        <para>As the number of possible filesystems is large, predefined sets of filesystems are provided.  A set
+        starts with <literal>@</literal> character, followed by name of the set.</para>
+
+        <table>
+          <title>Currently predefined filesystem sets</title>
+
+          <tgroup cols='2'>
+            <colspec colname='set' />
+            <colspec colname='description' />
+            <thead>
+              <row>
+                <entry>Set</entry>
+                <entry>Description</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry>@basic-api</entry>
+                <entry>Basic filesystem API.</entry>
+              </row>
+              <row>
+                <entry>@auxiliary-api</entry>
+                <entry>Auxiliary filesystem API.</entry>
+              </row>
+              <row>
+                <entry>@common-block</entry>
+                <entry>Common block device filesystems.</entry>
+              </row>
+              <row>
+                <entry>@historical-block</entry>
+                <entry>Historical block device filesystems.</entry>
+              </row>
+              <row>
+                <entry>@network</entry>
+                <entry>Well-known network filesystems.</entry>
+              </row>
+              <row>
+                <entry>@privileged-api</entry>
+                <entry>Privileged filesystem API.</entry>
+              </row>
+              <row>
+                <entry>@temporary</entry>
+                <entry>Temporary filesystems: tmpfs, ramfs.</entry>
+              </row>
+              <row>
+                <entry>@known</entry>
+                <entry>All known filesystems defined by the kernel. This list is defined statically in systemd based on a kernel
+                version that was available when this systemd version was released. It will become progressively more
+                out-of-date as the kernel is updated.</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
+
+        <para>Use
+        <citerefentry><refentrytitle>systemd-analyze</refentrytitle><manvolnum>1</manvolnum></citerefentry>'s
+        <command>filesystems</command> command to retrieve a list of filesystems defined on the local
+        system.</para>
+
+        <para>Note that this setting might not be supported on some systems (for example if the LSM eBPF hook is
+        not enabled in the underlying kernel or if not using the unified control group hierarchy). In that case this setting
+        has no effect.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -3734,6 +3854,11 @@ StandardInputData=SWNrIHNpdHplIGRhIHVuJyBlc3NlIEtsb3BzLAp1ZmYgZWVtYWwga2xvcHAncy
             <entry>243</entry>
             <entry><constant>EXIT_CREDENTIALS</constant></entry>
             <entry>Failed to set up unit's credentials. See <varname>LoadCredential=</varname> and <varname>SetCredential=</varname> above.</entry>
+          </row>
+          <row>
+            <entry>245</entry>
+            <entry><constant>EXIT_BPF</constant></entry>
+            <entry>Failed to apply BPF restrictions. See <varname>RestrictFileSystems=</varname> above.</entry>
           </row>
         </tbody>
       </tgroup>

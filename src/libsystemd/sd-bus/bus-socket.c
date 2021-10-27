@@ -173,12 +173,12 @@ static int bus_socket_auth_verify_client(sd_bus *b) {
         if (!d)
                 return 0;
 
-        e = memmem(d + 2, b->rbuffer_size - (d - (char*) b->rbuffer) - 2, "\r\n", 2);
+        e = memmem_safe(d + 2, b->rbuffer_size - (d - (char*) b->rbuffer) - 2, "\r\n", 2);
         if (!e)
                 return 0;
 
         if (b->accept_fd) {
-                f = memmem(e + 2, b->rbuffer_size - (e - (char*) b->rbuffer) - 2, "\r\n", 2);
+                f = memmem_safe(e + 2, b->rbuffer_size - (e - (char*) b->rbuffer) - 2, "\r\n", 2);
                 if (!f)
                         return 0;
 
@@ -399,7 +399,7 @@ static int bus_socket_auth_verify_server(sd_bus *b) {
         for (;;) {
                 /* Check if line is complete */
                 line = (char*) b->rbuffer + b->auth_rbegin;
-                e = memmem(line, b->rbuffer_size - b->auth_rbegin, "\r\n", 2);
+                e = memmem_safe(line, b->rbuffer_size - b->auth_rbegin, "\r\n", 2);
                 if (!e)
                         return processed;
 
@@ -726,7 +726,8 @@ static int bus_socket_inotify_setup(sd_bus *b) {
         }
 
         /* Make sure the path is NUL terminated */
-        p = strndupa(b->sockaddr.un.sun_path, sizeof(b->sockaddr.un.sun_path));
+        p = strndupa_safe(b->sockaddr.un.sun_path,
+                          sizeof(b->sockaddr.un.sun_path));
 
         /* Make sure the path is absolute */
         r = path_make_absolute_cwd(p, &absolute);

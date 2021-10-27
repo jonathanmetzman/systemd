@@ -9,6 +9,7 @@
 #include "bus-locator.h"
 #include "bus-unit-util.h"
 #include "bus-wait-for-jobs.h"
+#include "chase-symlinks.h"
 #include "device-util.h"
 #include "dirent-util.h"
 #include "escape.h"
@@ -329,8 +330,11 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
+
+        if (arg_user)
+                arg_ask_password = false;
 
         if (arg_user && arg_transport != BUS_TRANSPORT_LOCAL)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
@@ -1530,7 +1534,7 @@ static int run(int argc, char* argv[]) {
                 break;
 
         default:
-                assert_not_reached("Unexpected action.");
+                assert_not_reached();
         }
 
         return r;

@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "sd-id128.h"
@@ -293,6 +294,7 @@ typedef struct Unit {
 
         /* Counterparts in the cgroup filesystem */
         char *cgroup_path;
+        uint64_t cgroup_id;
         CGroupMask cgroup_realized_mask;           /* In which hierarchies does this unit's cgroup exist? (only relevant on cgroup v1) */
         CGroupMask cgroup_enabled_mask;            /* Which controllers are enabled (or more correctly: enabled for the children) for this unit's cgroup? (only relevant on cgroup v2) */
         CGroupMask cgroup_invalidated_mask;        /* A mask specifying controllers which shall be considered invalidated, and require re-realization */
@@ -333,6 +335,12 @@ typedef struct Unit {
          * address. */
         struct bpf_link *ipv4_socket_bind_link;
         struct bpf_link *ipv6_socket_bind_link;
+#endif
+
+        FDSet *initial_restric_ifaces_link_fds;
+#if BPF_FRAMEWORK
+        struct bpf_link *restrict_ifaces_ingress_bpf_link;
+        struct bpf_link *restrict_ifaces_egress_bpf_link;
 #endif
 
         /* Low-priority event source which is used to remove watched PIDs that have gone away, and subscribe to any new
@@ -651,6 +659,10 @@ typedef struct UnitVTable {
         /* If this function is set and returns false all jobs for units
          * of this type will immediately fail. */
         bool (*supported)(void);
+
+        /* If this function is set, it's invoked first as part of starting a unit to allow start rate
+         * limiting checks to occur before we do anything else. */
+        int (*test_start_limit)(Unit *u);
 
         /* The strings to print in status messages */
         UnitStatusMessageFormats status_message_formats;
@@ -973,6 +985,8 @@ void unit_thawed(Unit *u);
 
 int unit_freeze_vtable_common(Unit *u);
 int unit_thaw_vtable_common(Unit *u);
+
+Condition *unit_find_failed_condition(Unit *u);
 
 /* Macros which append UNIT= or USER_UNIT= to the message */
 

@@ -44,9 +44,9 @@
 #include "exit-status.h"
 #include "fd-util.h"
 #include "fileio.h"
-#include "fs-util.h"
 #include "generator-setup.h"
 #include "hashmap.h"
+#include "inotify-util.h"
 #include "install.h"
 #include "io-util.h"
 #include "label.h"
@@ -578,8 +578,7 @@ static int manager_setup_signals(Manager *m) {
                         SIGRTMIN+22, /* systemd: set log level to LOG_DEBUG */
                         SIGRTMIN+23, /* systemd: set log level to LOG_INFO */
                         SIGRTMIN+24, /* systemd: Immediate exit (--user only) */
-
-                        /* .. one free signal here ... */
+                        SIGRTMIN+25, /* systemd: reexecute manager */
 
                         /* Apparently Linux on hppa had fewer RT signals until v3.18,
                          * SIGRTMAX was SIGRTMIN+25, and then SIGRTMIN was lowered,
@@ -931,6 +930,14 @@ int manager_new(UnitFileScope scope, ManagerTestRunFlags test_run_flags, Manager
                 r = manager_setup_sigchld_event_source(m);
                 if (r < 0)
                         return r;
+
+#if HAVE_LIBBPF
+                if (MANAGER_IS_SYSTEM(m) && lsm_bpf_supported()) {
+                        r = lsm_bpf_setup(m);
+                        if (r < 0)
+                                return r;
+                }
+#endif
         }
 
         if (test_run_flags == 0) {
@@ -1438,6 +1445,10 @@ static void manager_clear_jobs_and_units(Manager *m) {
         assert(!m->cleanup_queue);
         assert(!m->gc_unit_queue);
         assert(!m->gc_job_queue);
+        assert(!m->cgroup_realize_queue);
+        assert(!m->cgroup_empty_queue);
+        assert(!m->cgroup_oom_queue);
+        assert(!m->target_deps_queue);
         assert(!m->stop_when_unneeded_queue);
         assert(!m->start_when_upheld_queue);
         assert(!m->stop_when_bound_queue);
@@ -1532,13 +1543,17 @@ Manager* manager_free(Manager *m) {
                 m->prefix[dt] = mfree(m->prefix[dt]);
         free(m->received_credentials);
 
+#if BPF_FRAMEWORK
+        lsm_bpf_destroy(m->restrict_fs);
+#endif
+
         return mfree(m);
 }
 
 static void manager_enumerate_perpetual(Manager *m) {
         assert(m);
 
-        if (m->test_run_flags == MANAGER_TEST_RUN_MINIMAL)
+        if (FLAGS_SET(m->test_run_flags, MANAGER_TEST_RUN_MINIMAL))
                 return;
 
         /* Let's ask every type to load all units from disk/kernel that it might know */
@@ -1556,7 +1571,7 @@ static void manager_enumerate_perpetual(Manager *m) {
 static void manager_enumerate(Manager *m) {
         assert(m);
 
-        if (m->test_run_flags == MANAGER_TEST_RUN_MINIMAL)
+        if (FLAGS_SET(m->test_run_flags, MANAGER_TEST_RUN_MINIMAL))
                 return;
 
         /* Let's ask every type to load all units from disk/kernel that it might know */
@@ -1728,7 +1743,7 @@ void manager_reloading_stopp(Manager **m) {
         }
 }
 
-int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
+int manager_startup(Manager *m, FILE *serialization, FDSet *fds, const char *root) {
         int r;
 
         assert(m);
@@ -1737,7 +1752,7 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
          * but we should not touch the real generator directories. */
         r = lookup_paths_init(&m->lookup_paths, m->unit_file_scope,
                               MANAGER_IS_TEST_RUN(m) ? LOOKUP_PATHS_TEMPORARY_GENERATED : 0,
-                              NULL);
+                              root);
         if (r < 0)
                 return log_error_errno(r, "Failed to initialize path lookup table: %m");
 
@@ -1755,7 +1770,7 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
 
         {
                 /* This block is (optionally) done with the reloading counter bumped */
-                _cleanup_(manager_reloading_stopp) Manager *reloading = NULL;
+                _unused_ _cleanup_(manager_reloading_stopp) Manager *reloading = NULL;
 
                 /* If we will deserialize make sure that during enumeration this is already known, so we increase the
                  * counter here already */
@@ -1807,7 +1822,7 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
 
                 r = manager_varlink_init(m);
                 if (r < 0)
-                        log_warning_errno(r, "Failed to set up Varlink server, ignoring: %m");
+                        log_warning_errno(r, "Failed to set up Varlink, ignoring: %m");
 
                 /* Third, fire things up! */
                 manager_coldplug(m);
@@ -2846,6 +2861,10 @@ static int manager_dispatch_signal_fd(sd_event_source *source, int fd, uint32_t 
                         /* This is a nop on init */
                         break;
 
+                case 25:
+                        m->objective = MANAGER_REEXECUTE;
+                        break;
+
                 case 26:
                 case 29: /* compatibility: used to be mapped to LOG_TARGET_SYSLOG_OR_KMSG */
                         manager_restore_original_log_target(m);
@@ -2971,13 +2990,8 @@ int manager_loop(Manager *m) {
                 return log_error_errno(r, "Failed to enable SIGCHLD event source: %m");
 
         while (m->objective == MANAGER_OK) {
-                usec_t wait_usec, watchdog_usec;
 
-                watchdog_usec = manager_get_watchdog(m, WATCHDOG_RUNTIME);
-                if (m->runtime_watchdog_running)
-                        (void) watchdog_ping();
-                else if (timestamp_is_set(watchdog_usec))
-                        manager_retry_runtime_watchdog(m);
+                (void) watchdog_ping();
 
                 if (!ratelimit_below(&rl)) {
                         /* Yay, something is going seriously wrong, pause a little */
@@ -3013,12 +3027,7 @@ int manager_loop(Manager *m) {
                         continue;
 
                 /* Sleep for watchdog runtime wait time */
-                if (timestamp_is_set(watchdog_usec))
-                        wait_usec = watchdog_runtime_wait();
-                else
-                        wait_usec = USEC_INFINITY;
-
-                r = sd_event_run(m->event, wait_usec);
+                r = sd_event_run(m->event, watchdog_runtime_wait());
                 if (r < 0)
                         return log_error_errno(r, "Failed to run event loop: %m");
         }
@@ -3196,7 +3205,6 @@ usec_t manager_get_watchdog(Manager *m, WatchdogType t) {
 }
 
 void manager_set_watchdog(Manager *m, WatchdogType t, usec_t timeout) {
-        int r = 0;
 
         assert(m);
 
@@ -3207,23 +3215,13 @@ void manager_set_watchdog(Manager *m, WatchdogType t, usec_t timeout) {
                 return;
 
         if (t == WATCHDOG_RUNTIME)
-                if (!timestamp_is_set(m->watchdog_overridden[WATCHDOG_RUNTIME])) {
-                        if (timestamp_is_set(timeout)) {
-                                r = watchdog_set_timeout(&timeout);
-
-                                if (r >= 0)
-                                        m->runtime_watchdog_running = true;
-                        } else {
-                                watchdog_close(true);
-                                m->runtime_watchdog_running = false;
-                        }
-                }
+                if (!timestamp_is_set(m->watchdog_overridden[WATCHDOG_RUNTIME]))
+                        (void) watchdog_setup(timeout);
 
         m->watchdog[t] = timeout;
 }
 
 int manager_override_watchdog(Manager *m, WatchdogType t, usec_t timeout) {
-        int r = 0;
 
         assert(m);
 
@@ -3234,41 +3232,17 @@ int manager_override_watchdog(Manager *m, WatchdogType t, usec_t timeout) {
                 return 0;
 
         if (t == WATCHDOG_RUNTIME) {
-                usec_t *p;
+                usec_t usec = timestamp_is_set(timeout) ? timeout : m->watchdog[t];
 
-                p = timestamp_is_set(timeout) ? &timeout : &m->watchdog[t];
-                if (timestamp_is_set(*p)) {
-                        r = watchdog_set_timeout(p);
-
-                        if (r >= 0)
-                                m->runtime_watchdog_running = true;
-                } else {
-                        watchdog_close(true);
-                        m->runtime_watchdog_running = false;
-                }
+                (void) watchdog_setup(usec);
         }
 
         m->watchdog_overridden[t] = timeout;
-
         return 0;
 }
 
-void manager_retry_runtime_watchdog(Manager *m) {
-        int r = 0;
-
-        assert(m);
-
-        if (timestamp_is_set(m->watchdog_overridden[WATCHDOG_RUNTIME]))
-                r = watchdog_set_timeout(&m->watchdog_overridden[WATCHDOG_RUNTIME]);
-        else
-                r = watchdog_set_timeout(&m->watchdog[WATCHDOG_RUNTIME]);
-
-        if (r >= 0)
-                m->runtime_watchdog_running = true;
-}
-
 int manager_reload(Manager *m) {
-        _cleanup_(manager_reloading_stopp) Manager *reloading = NULL;
+        _unused_ _cleanup_(manager_reloading_stopp) Manager *reloading = NULL;
         _cleanup_fdset_free_ FDSet *fds = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         int r;
@@ -3669,7 +3643,7 @@ int manager_transient_environment_add(Manager *m, char **plus) {
         if (strv_isempty(plus))
                 return 0;
 
-        a = strv_env_merge(2, m->transient_environment, plus);
+        a = strv_env_merge(m->transient_environment, plus);
         if (!a)
                 return log_oom();
 
@@ -3701,7 +3675,7 @@ int manager_client_environment_modify(
         }
 
         if (!strv_isempty(plus)) {
-                b = strv_env_merge(2, l, plus);
+                b = strv_env_merge(l, plus);
                 if (!b) {
                         strv_free(a);
                         return -ENOMEM;
@@ -3728,7 +3702,7 @@ int manager_get_effective_environment(Manager *m, char ***ret) {
         assert(m);
         assert(ret);
 
-        l = strv_env_merge(2, m->transient_environment, m->client_environment);
+        l = strv_env_merge(m->transient_environment, m->client_environment);
         if (!l)
                 return -ENOMEM;
 
@@ -4108,7 +4082,7 @@ static void manager_unref_uid_internal(
         /* A generic implementation, covering both manager_unref_uid() and manager_unref_gid(), under the assumption
          * that uid_t and gid_t are actually defined the same way, with the same validity rules.
          *
-         * We store a hashmap where the UID/GID is they key and the value is a 32bit reference counter, whose highest
+         * We store a hashmap where the key is the UID/GID and the value is a 32bit reference counter, whose highest
          * bit is used as flag for marking UIDs/GIDs whose IPC objects to remove when the last reference to the UID/GID
          * is dropped. The flag is set to on, once at least one reference from a unit where RemoveIPC= is set is added
          * on a UID/GID. It is reset when the UID's/GID's reference counter drops to 0 again. */

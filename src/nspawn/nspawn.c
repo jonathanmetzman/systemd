@@ -33,6 +33,7 @@
 #include "cap-list.h"
 #include "capability-util.h"
 #include "cgroup-util.h"
+#include "chase-symlinks.h"
 #include "copy.h"
 #include "cpu-set-util.h"
 #include "creds-util.h"
@@ -228,6 +229,7 @@ static ConsoleMode arg_console_mode = _CONSOLE_MODE_INVALID;
 static Credential *arg_credentials = NULL;
 static size_t arg_n_credentials = 0;
 static char **arg_bind_user = NULL;
+static bool arg_suppress_sync = false;
 
 STATIC_DESTRUCTOR_REGISTER(arg_directory, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_template, freep);
@@ -338,10 +340,12 @@ static int help(void) {
                "  -a --as-pid2              Maintain a stub init as PID1, invoke binary as PID2\n"
                "  -b --boot                 Boot up full system (i.e. invoke init)\n"
                "     --chdir=PATH           Set working directory in the container\n"
-               "  -E --setenv=NAME=VALUE    Pass an environment variable to PID 1\n"
+               "  -E --setenv=NAME[=VALUE]  Pass an environment variable to PID 1\n"
                "  -u --user=USER            Run the command under specified user or UID\n"
                "     --kill-signal=SIGNAL   Select signal to use for shutting down PID 1\n"
-               "     --notify-ready=BOOLEAN Receive notifications from the child init process\n\n"
+               "     --notify-ready=BOOLEAN Receive notifications from the child init process\n"
+               "     --suppress-sync=BOOLEAN\n"
+               "                            Suppress any form of disk data synchronization\n\n"
                "%3$sSystem Identity:%4$s\n"
                "  -M --machine=NAME         Set the machine name for the container\n"
                "     --hostname=NAME        Override the hostname for the container\n"
@@ -653,6 +657,12 @@ static int parse_environment(void) {
         if (e)
                 arg_container_service_name = e;
 
+        r = getenv_bool("SYSTEMD_SUPPRESS_SYNC");
+        if (r >= 0)
+                arg_suppress_sync = r;
+        else if (r != -ENXIO)
+                log_debug_errno(r, "Failed to parse $SYSTEMD_SUPPRESS_SYNC, ignoring: %m");
+
         return detect_unified_cgroup_hierarchy_from_environment();
 }
 
@@ -712,6 +722,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_SET_CREDENTIAL,
                 ARG_LOAD_CREDENTIAL,
                 ARG_BIND_USER,
+                ARG_SUPPRESS_SYNC,
         };
 
         static const struct option options[] = {
@@ -784,6 +795,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "set-credential",         required_argument, NULL, ARG_SET_CREDENTIAL         },
                 { "load-credential",        required_argument, NULL, ARG_LOAD_CREDENTIAL        },
                 { "bind-user",              required_argument, NULL, ARG_BIND_USER              },
+                { "suppress-sync",          required_argument, NULL, ARG_SUPPRESS_SYNC          },
                 {}
         };
 
@@ -1121,17 +1133,13 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_settings_mask |= SETTING_CUSTOM_MOUNTS;
                         break;
 
-                case 'E': {
-                        if (!env_assignment_is_valid(optarg))
-                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                                       "Environment variable assignment '%s' is not valid.", optarg);
-                        r = strv_env_replace_strdup(&arg_setenv, optarg);
+                case 'E':
+                        r = strv_env_replace_strdup_passthrough(&arg_setenv, optarg);
                         if (r < 0)
-                                return r;
+                                return log_error_errno(r, "Cannot assign environment variable %s: %m", optarg);
 
                         arg_settings_mask |= SETTING_ENVIRONMENT;
                         break;
-                }
 
                 case 'q':
                         arg_quiet = true;
@@ -1671,11 +1679,19 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_settings_mask |= SETTING_BIND_USER;
                         break;
 
+                case ARG_SUPPRESS_SYNC:
+                        r = parse_boolean_argument("--suppress-sync=", optarg, &arg_suppress_sync);
+                        if (r < 0)
+                                return r;
+
+                        arg_settings_mask |= SETTING_SUPPRESS_SYNC;
+                        break;
+
                 case '?':
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
 
         if (argc > optind) {
@@ -2013,7 +2029,7 @@ static int setup_timezone(const char *dest) {
                 break;
 
         default:
-                assert_not_reached("unexpected mode");
+                assert_not_reached();
         }
 
         /* Fix permissions of the symlink or file copy we just created */
@@ -2200,7 +2216,7 @@ static int copy_devnodes(const char *dest) {
                 "tty\0"
                 "net/tun\0";
 
-        _cleanup_umask_ mode_t u;
+        _unused_ _cleanup_umask_ mode_t u;
         const char *d;
         int r = 0;
 
@@ -2283,7 +2299,7 @@ static int copy_devnodes(const char *dest) {
 }
 
 static int make_extra_nodes(const char *dest) {
-        _cleanup_umask_ mode_t u;
+        _unused_ _cleanup_umask_ mode_t u;
         size_t i;
         int r;
 
@@ -2484,7 +2500,7 @@ static int setup_kmsg(int kmsg_socket) {
         _cleanup_(unlink_and_freep) char *from = NULL;
         _cleanup_free_ char *fifo = NULL;
         _cleanup_close_ int fd = -1;
-        _cleanup_umask_ mode_t u;
+        _unused_ _cleanup_umask_ mode_t u;
         int r;
 
         assert(kmsg_socket >= 0);
@@ -2554,7 +2570,6 @@ static int setup_hostname(void) {
 
 static int setup_journal(const char *directory) {
         _cleanup_free_ char *d = NULL;
-        char id[SD_ID128_STRING_MAX];
         const char *dirname, *p, *q;
         sd_id128_t this_id;
         bool try;
@@ -2575,7 +2590,7 @@ static int setup_journal(const char *directory) {
 
         if (sd_id128_equal(arg_uuid, this_id)) {
                 log_full(try ? LOG_WARNING : LOG_ERR,
-                         "Host and machine ids are equal (%s): refusing to link journals", sd_id128_to_string(arg_uuid, id));
+                         "Host and machine ids are equal (%s): refusing to link journals", SD_ID128_TO_STRING(arg_uuid));
                 if (try)
                         return 0;
                 return -EEXIST;
@@ -2591,9 +2606,7 @@ static int setup_journal(const char *directory) {
                 }
         }
 
-        (void) sd_id128_to_string(arg_uuid, id);
-
-        p = strjoina("/var/log/journal/", id);
+        p = strjoina("/var/log/journal/", SD_ID128_TO_STRING(arg_uuid));
         q = prefix_roota(directory, p);
 
         if (path_is_mount_point(p, NULL, 0) > 0) {
@@ -3187,10 +3200,9 @@ static int inner_child(
                 char **os_release_pairs) {
 
         _cleanup_free_ char *home = NULL;
-        char as_uuid[ID128_UUID_STRING_MAX];
         size_t n_env = 1;
-        const char *envp[] = {
-                "PATH=" DEFAULT_PATH_COMPAT,
+        char *envp[] = {
+                (char*) "PATH=" DEFAULT_PATH_COMPAT,
                 NULL, /* container */
                 NULL, /* TERM */
                 NULL, /* HOME */
@@ -3392,6 +3404,16 @@ static int inner_child(
                         return r;
         }
 
+        if (arg_suppress_sync) {
+#if HAVE_SECCOMP
+                r = seccomp_suppress_sync();
+                if (r < 0)
+                        log_debug_errno(r, "Failed to install sync() suppression seccomp filter, ignoring: %m");
+#else
+                log_debug("systemd is built without SECCOMP support. Ignoring --suppress-sync= command line option and SuppressSync= setting.");
+#endif
+        }
+
 #if HAVE_SELINUX
         if (arg_selinux_context)
                 if (setexeccon(arg_selinux_context) < 0)
@@ -3426,17 +3448,17 @@ static int inner_child(
                 n_env++;
 
         if (home || !uid_is_valid(arg_uid) || arg_uid == 0)
-                if (asprintf((char**)(envp + n_env++), "HOME=%s", home ?: "/root") < 0)
+                if (asprintf(envp + n_env++, "HOME=%s", home ?: "/root") < 0)
                         return log_oom();
 
         if (arg_user || !uid_is_valid(arg_uid) || arg_uid == 0)
-                if (asprintf((char**)(envp + n_env++), "USER=%s", arg_user ?: "root") < 0 ||
-                    asprintf((char**)(envp + n_env++), "LOGNAME=%s", arg_user ? arg_user : "root") < 0)
+                if (asprintf(envp + n_env++, "USER=%s", arg_user ?: "root") < 0 ||
+                    asprintf(envp + n_env++, "LOGNAME=%s", arg_user ? arg_user : "root") < 0)
                         return log_oom();
 
         assert(!sd_id128_is_null(arg_uuid));
 
-        if (asprintf((char**)(envp + n_env++), "container_uuid=%s", id128_to_uuid_string(arg_uuid, as_uuid)) < 0)
+        if (asprintf(envp + n_env++, "container_uuid=%s", ID128_TO_UUID_STRING(arg_uuid)) < 0)
                 return log_oom();
 
         if (fdset_size(fds) > 0) {
@@ -3444,11 +3466,11 @@ static int inner_child(
                 if (r < 0)
                         return log_error_errno(r, "Failed to unset O_CLOEXEC for file descriptors.");
 
-                if ((asprintf((char **)(envp + n_env++), "LISTEN_FDS=%u", fdset_size(fds)) < 0) ||
-                    (asprintf((char **)(envp + n_env++), "LISTEN_PID=1") < 0))
+                if ((asprintf(envp + n_env++, "LISTEN_FDS=%u", fdset_size(fds)) < 0) ||
+                    (asprintf(envp + n_env++, "LISTEN_PID=1") < 0))
                         return log_oom();
         }
-        if (asprintf((char **)(envp + n_env++), "NOTIFY_SOCKET=%s", NSPAWN_NOTIFY_SOCKET_PATH) < 0)
+        if (asprintf(envp + n_env++, "NOTIFY_SOCKET=%s", NSPAWN_NOTIFY_SOCKET_PATH) < 0)
                 return log_oom();
 
         if (arg_n_credentials > 0) {
@@ -3458,7 +3480,7 @@ static int inner_child(
                 n_env++;
         }
 
-        env_use = strv_env_merge(3, envp, os_release_pairs, arg_setenv);
+        env_use = strv_env_merge(envp, os_release_pairs, arg_setenv);
         if (!env_use)
                 return log_oom();
 
@@ -4559,6 +4581,9 @@ static int merge_settings(Settings *settings, const char *path) {
                         arg_console_mode = settings->console_mode;
         }
 
+        if ((arg_settings_mask & SETTING_SUPPRESS_SYNC) == 0)
+                arg_suppress_sync = settings->suppress_sync;
+
         /* The following properties can only be set through the OCI settings logic, not from the command line, hence we
          * don't consult arg_settings_mask for them. */
 
@@ -5310,6 +5335,15 @@ static int initialize_rlimits(void) {
                                         return log_error_errno(errno, "Failed to read resource limit RLIMIT_%s of PID 1: %m", rlimit_to_string(rl));
 
                                 v = &buffer;
+                        } else if (rl == RLIMIT_NOFILE) {
+                                /* We nowadays bump RLIMIT_NOFILE's hard limit early in PID 1 for all
+                                 * userspace. Given that nspawn containers are often run without our PID 1,
+                                 * let's grant the containers a raised RLIMIT_NOFILE hard limit by default,
+                                 * so that container userspace gets similar resources as host userspace
+                                 * gets. */
+                                buffer = kernel_defaults[rl];
+                                buffer.rlim_max = MIN((rlim_t) read_nr_open(), (rlim_t) HIGH_RLIMIT_NOFILE);
+                                v = &buffer;
                         } else
                                 v = kernel_defaults + rl;
 
@@ -5353,7 +5387,7 @@ static int cant_be_in_netns(void) {
         if (fd < 0)
                 return log_error_errno(errno, "Failed to allocate udev control socket: %m");
 
-        if (connect(fd, &sa.un, SOCKADDR_UN_LEN(sa.un)) < 0) {
+        if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0) {
 
                 if (errno == ENOENT || ERRNO_IS_DISCONNECT(errno))
                         return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
@@ -5700,6 +5734,7 @@ static int run(int argc, char *argv[]) {
                                 arg_image,
                                 &arg_verity_settings,
                                 NULL,
+                                loop->diskseq,
                                 loop->uevent_seqnum_not_before,
                                 loop->timestamp_not_before,
                                 dissect_image_flags,
@@ -5717,8 +5752,16 @@ static int run(int argc, char *argv[]) {
                 if (r < 0)
                         goto finish;
 
-                if (!arg_verity_settings.root_hash && dissected_image->can_verity)
-                        log_notice("Note: image %s contains verity information, but no root hash specified! Proceeding without integrity checking.", arg_image);
+                r = dissected_image_load_verity_sig_partition(
+                                dissected_image,
+                                loop->fd,
+                                &arg_verity_settings);
+                if (r < 0)
+                        goto finish;
+
+                if (dissected_image->has_verity && !arg_verity_settings.root_hash && !dissected_image->has_verity_sig)
+                        log_notice("Note: image %s contains verity information, but no root hash specified and no embedded "
+                                   "root hash signature found! Proceeding without integrity checking.", arg_image);
 
                 r = dissected_image_decrypt_interactively(
                                 dissected_image,

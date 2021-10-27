@@ -21,6 +21,7 @@
 #include "alloc-util.h"
 #include "btrfs-util.h"
 #include "capability-util.h"
+#include "chase-symlinks.h"
 #include "chattr-util.h"
 #include "conf-files.h"
 #include "copy.h"
@@ -194,7 +195,7 @@ static Set *unix_sockets = NULL;
 
 STATIC_DESTRUCTOR_REGISTER(items, ordered_hashmap_freep);
 STATIC_DESTRUCTOR_REGISTER(globs, ordered_hashmap_freep);
-STATIC_DESTRUCTOR_REGISTER(unix_sockets, set_free_freep);
+STATIC_DESTRUCTOR_REGISTER(unix_sockets, set_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_include_prefixes, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_exclude_prefixes, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_root, freep);
@@ -421,7 +422,7 @@ static struct Item* find_glob(OrderedHashmap *h, const char *match) {
 }
 
 static int load_unix_sockets(void) {
-        _cleanup_set_free_free_ Set *sockets = NULL;
+        _cleanup_set_free_ Set *sockets = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         int r;
 
@@ -429,10 +430,6 @@ static int load_unix_sockets(void) {
                 return 0;
 
         /* We maintain a cache of the sockets we found in /proc/net/unix to speed things up a little. */
-
-        sockets = set_new(&path_hash_ops);
-        if (!sockets)
-                return log_oom();
 
         f = fopen("/proc/net/unix", "re");
         if (!f)
@@ -447,7 +444,7 @@ static int load_unix_sockets(void) {
                 return log_warning_errno(SYNTHETIC_ERRNO(EIO), "Premature end of file reading /proc/net/unix.");
 
         for (;;) {
-                _cleanup_free_ char *line = NULL, *s = NULL;
+                _cleanup_free_ char *line = NULL;
                 char *p;
 
                 r = read_line(f, LONG_LINE_MAX, &line);
@@ -468,22 +465,12 @@ static int load_unix_sockets(void) {
                 p += strcspn(p, WHITESPACE); /* skip one more word */
                 p += strspn(p, WHITESPACE);
 
-                if (*p != '/')
+                if (!path_is_absolute(p))
                         continue;
 
-                s = strdup(p);
-                if (!s)
-                        return log_oom();
-
-                path_simplify(s);
-
-                r = set_consume(sockets, s);
-                if (r == -EEXIST)
-                        continue;
+                r = set_put_strdup_full(&sockets, &path_hash_ops_free, p);
                 if (r < 0)
                         return log_warning_errno(r, "Failed to add AF_UNIX socket to set, ignoring: %m");
-
-                TAKE_PTR(s);
         }
 
         unix_sockets = TAKE_PTR(sockets);
@@ -496,7 +483,7 @@ static bool unix_socket_alive(const char *fn) {
         if (load_unix_sockets() < 0)
                 return true;     /* We don't know, so assume yes */
 
-        return !!set_get(unix_sockets, (char*) fn);
+        return set_contains(unix_sockets, fn);
 }
 
 static DIR* xopendirat_nomod(int dirfd, const char *path) {
@@ -1058,18 +1045,15 @@ static int parse_xattrs_from_arg(Item *i) {
 }
 
 static int fd_set_xattrs(Item *i, int fd, const char *path, const struct stat *st) {
-        char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
         char **name, **value;
 
         assert(i);
         assert(fd >= 0);
         assert(path);
 
-        xsprintf(procfs_path, "/proc/self/fd/%i", fd);
-
         STRV_FOREACH_PAIR(name, value, i->xattrs) {
                 log_debug("Setting extended attribute '%s=%s' on %s.", *name, *value, path);
-                if (setxattr(procfs_path, *name, *value, strlen(*value), 0) < 0)
+                if (setxattr(FORMAT_PROC_FD_PATH(fd), *name, *value, strlen(*value), 0) < 0)
                         return log_error_errno(errno, "Setting extended attribute %s=%s on %s failed: %m",
                                                *name, *value, path);
         }
@@ -1161,7 +1145,6 @@ static int path_set_acl(const char *path, const char *pretty, acl_type_t type, a
 static int fd_set_acls(Item *item, int fd, const char *path, const struct stat *st) {
         int r = 0;
 #if HAVE_ACL
-        char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
         struct stat stbuf;
 
         assert(item);
@@ -1184,14 +1167,12 @@ static int fd_set_acls(Item *item, int fd, const char *path, const struct stat *
                 return 0;
         }
 
-        xsprintf(procfs_path, "/proc/self/fd/%i", fd);
-
         if (item->acl_access)
-                r = path_set_acl(procfs_path, path, ACL_TYPE_ACCESS, item->acl_access, item->append_or_force);
+                r = path_set_acl(FORMAT_PROC_FD_PATH(fd), path, ACL_TYPE_ACCESS, item->acl_access, item->append_or_force);
 
         /* set only default acls to folders */
         if (r == 0 && item->acl_default && S_ISDIR(st->st_mode))
-                r = path_set_acl(procfs_path, path, ACL_TYPE_DEFAULT, item->acl_default, item->append_or_force);
+                r = path_set_acl(FORMAT_PROC_FD_PATH(fd), path, ACL_TYPE_DEFAULT, item->acl_default, item->append_or_force);
 
         if (ERRNO_IS_NOT_SUPPORTED(r)) {
                 log_debug_errno(r, "ACLs not supported by file system at %s", path);
@@ -1938,17 +1919,14 @@ static int item_do(Item *i, int fd, const char *path, fdaction_t action) {
         r = action(i, fd, path, &st);
 
         if (S_ISDIR(st.st_mode)) {
-                char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
                 _cleanup_closedir_ DIR *d = NULL;
                 struct dirent *de;
 
-                /* The passed 'fd' was opened with O_PATH. We need to convert
-                 * it into a 'regular' fd before reading the directory content. */
-                xsprintf(procfs_path, "/proc/self/fd/%i", fd);
-
-                d = opendir(procfs_path);
+                /* The passed 'fd' was opened with O_PATH. We need to convert it into a 'regular' fd before
+                 * reading the directory content. */
+                d = opendir(FORMAT_PROC_FD_PATH(fd));
                 if (!d) {
-                        log_error_errno(errno, "Failed to opendir() '%s': %m", procfs_path);
+                        log_error_errno(errno, "Failed to opendir() '%s': %m", FORMAT_PROC_FD_PATH(fd));
                         if (r == 0)
                                 r = -errno;
                         goto finish;
@@ -2447,7 +2425,7 @@ static int remove_item_instance(Item *i, const char *instance) {
                 break;
 
         default:
-                assert_not_reached("wut?");
+                assert_not_reached();
         }
 
         return 0;
@@ -3505,7 +3483,7 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
 
         if (arg_operation == 0 && !arg_cat_config)
@@ -3853,7 +3831,7 @@ static int run(int argc, char *argv[]) {
                 else if (phase == PHASE_CREATE)
                         op = arg_operation & OPERATION_CREATE;
                 else
-                        assert_not_reached("unexpected phase");
+                        assert_not_reached();
 
                 if (op == 0) /* Nothing requested in this phase */
                         continue;

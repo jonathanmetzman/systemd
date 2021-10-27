@@ -17,6 +17,7 @@
 #include "bus-util.h"
 #include "cgroup-setup.h"
 #include "cgroup-util.h"
+#include "chase-symlinks.h"
 #include "core-varlink.h"
 #include "dbus-unit.h"
 #include "dbus.h"
@@ -186,6 +187,11 @@ static void unit_init(Unit *u) {
         ec = unit_get_exec_context(u);
         if (ec) {
                 exec_context_init(ec);
+
+                if (u->manager->default_oom_score_adjust_set) {
+                        ec->oom_score_adjust = u->manager->default_oom_score_adjust;
+                        ec->oom_score_adjust_set = true;
+                }
 
                 if (MANAGER_IS_SYSTEM(u->manager))
                         ec->keyring_mode = EXEC_KEYRING_SHARED;
@@ -418,7 +424,7 @@ bool unit_may_gc(Unit *u) {
                 break;
 
         default:
-                assert_not_reached("Unknown garbage collection mode");
+                assert_not_reached();
         }
 
         if (u->cgroup_path) {
@@ -427,7 +433,7 @@ bool unit_may_gc(Unit *u) {
 
                 r = cg_is_empty_recursive(SYSTEMD_CGROUP_CONTROLLER, u->cgroup_path);
                 if (r < 0)
-                        log_unit_debug_errno(u, r, "Failed to determine whether cgroup %s is empty: %m", u->cgroup_path);
+                        log_unit_debug_errno(u, r, "Failed to determine whether cgroup %s is empty: %m", empty_to_root(u->cgroup_path));
                 if (r <= 0)
                         return false;
         }
@@ -733,6 +739,9 @@ Unit* unit_free(Unit *u) {
         if (u->in_dbus_queue)
                 LIST_REMOVE(dbus_queue, u->manager->dbus_unit_queue, u);
 
+        if (u->in_cleanup_queue)
+                LIST_REMOVE(cleanup_queue, u->manager->cleanup_queue, u);
+
         if (u->in_gc_queue)
                 LIST_REMOVE(gc_queue, u->manager->gc_unit_queue, u);
 
@@ -742,8 +751,8 @@ Unit* unit_free(Unit *u) {
         if (u->in_cgroup_empty_queue)
                 LIST_REMOVE(cgroup_empty_queue, u->manager->cgroup_empty_queue, u);
 
-        if (u->in_cleanup_queue)
-                LIST_REMOVE(cleanup_queue, u->manager->cleanup_queue, u);
+        if (u->in_cgroup_oom_queue)
+                LIST_REMOVE(cgroup_oom_queue, u->manager->cgroup_oom_queue, u);
 
         if (u->in_target_deps_queue)
                 LIST_REMOVE(target_deps_queue, u->manager->target_deps_queue, u);
@@ -761,7 +770,13 @@ Unit* unit_free(Unit *u) {
 
         hashmap_free(u->bpf_foreign_by_key);
 
-        bpf_program_unref(u->bpf_device_control_installed);
+        bpf_program_free(u->bpf_device_control_installed);
+
+#if BPF_FRAMEWORK
+        bpf_link_free(u->restrict_ifaces_ingress_bpf_link);
+        bpf_link_free(u->restrict_ifaces_egress_bpf_link);
+#endif
+        fdset_free(u->initial_restric_ifaces_link_fds);
 
         condition_free_list(u->conditions);
         condition_free_list(u->asserts);
@@ -1548,15 +1563,7 @@ static int unit_add_oomd_dependencies(Unit *u) {
 }
 
 static int unit_add_startup_units(Unit *u) {
-        CGroupContext *c;
-
-        c = unit_get_cgroup_context(u);
-        if (!c)
-                return 0;
-
-        if (c->startup_cpu_shares == CGROUP_CPU_SHARES_INVALID &&
-            c->startup_io_weight == CGROUP_WEIGHT_INVALID &&
-            c->startup_blockio_weight == CGROUP_BLKIO_WEIGHT_INVALID)
+        if (!unit_has_startup_cgroup_constraints(u))
                 return 0;
 
         return set_ensure_put(&u->manager->startup_units, NULL, u);
@@ -1718,7 +1725,7 @@ static bool unit_test_condition(Unit *u) {
         r = manager_get_effective_environment(u->manager, &env);
         if (r < 0) {
                 log_unit_error_errno(u, r, "Failed to determine effective environment: %m");
-                u->condition_result = CONDITION_ERROR;
+                u->condition_result = true;
         } else
                 u->condition_result = condition_test_list(
                                 u->conditions,
@@ -1847,6 +1854,13 @@ int unit_start(Unit *u) {
         Unit *following;
 
         assert(u);
+
+        /* Check start rate limiting early so that failure conditions don't cause us to enter a busy loop. */
+        if (UNIT_VTABLE(u)->test_start_limit) {
+                int r = UNIT_VTABLE(u)->test_start_limit(u);
+                if (r < 0)
+                        return r;
+        }
 
         /* If this is already started, then this will succeed. Note that this will even succeed if this unit
          * is not startable by the user. This is relied on to detect when we need to wait for units and when
@@ -2591,7 +2605,7 @@ static bool unit_process_job(Job *j, UnitActiveState ns, UnitNotifyFlags flags) 
                 break;
 
         default:
-                assert_not_reached("Job type unknown");
+                assert_not_reached();
         }
 
         return unexpected;
@@ -2983,7 +2997,7 @@ bool unit_job_is_applicable(Unit *u, JobType j) {
                 return unit_can_reload(u) && unit_can_start(u);
 
         default:
-                assert_not_reached("Invalid job type");
+                assert_not_reached();
         }
 }
 
@@ -3049,6 +3063,9 @@ int unit_add_dependency(
                 unit_maybe_warn_about_dependency(original_u, original_other->id, d);
                 return 0;
         }
+
+        if (u->manager && FLAGS_SET(u->manager->test_run_flags, MANAGER_TEST_RUN_IGNORE_DEPENDENCIES))
+                return 0;
 
         /* Note that ordering a device unit after a unit is permitted since it allows to start its job
          * running timeout at a specific time. */
@@ -3173,6 +3190,9 @@ int unit_add_dependency_by_name(Unit *u, UnitDependency d, const char *name, boo
         if (r < 0)
                 return r;
 
+        if (u->manager && FLAGS_SET(u->manager->test_run_flags, MANAGER_TEST_RUN_IGNORE_DEPENDENCIES))
+                return 0;
+
         r = manager_load_unit(u->manager, name, NULL, NULL, &other);
         if (r < 0)
                 return r;
@@ -3191,6 +3211,9 @@ int unit_add_two_dependencies_by_name(Unit *u, UnitDependency d, UnitDependency 
         r = resolve_template(u, name, &buf, &name);
         if (r < 0)
                 return r;
+
+        if (u->manager && FLAGS_SET(u->manager->test_run_flags, MANAGER_TEST_RUN_IGNORE_DEPENDENCIES))
+                return 0;
 
         r = manager_load_unit(u->manager, name, NULL, NULL, &other);
         if (r < 0)
@@ -3308,6 +3331,9 @@ int unit_set_default_slice(Unit *u) {
         int r;
 
         assert(u);
+
+        if (u->manager && FLAGS_SET(u->manager->test_run_flags, MANAGER_TEST_RUN_IGNORE_DEPENDENCIES))
+                return 0;
 
         if (UNIT_GET_SLICE(u))
                 return 0;
@@ -3573,7 +3599,6 @@ int unit_add_blockdev_dependency(Unit *u, const char *what, UnitDependencyMask m
 int unit_coldplug(Unit *u) {
         int r = 0, q;
         char **i;
-        Job *uj;
 
         assert(u);
 
@@ -3596,9 +3621,13 @@ int unit_coldplug(Unit *u) {
                         r = q;
         }
 
-        uj = u->job ?: u->nop_job;
-        if (uj) {
-                q = job_coldplug(uj);
+        if (u->job) {
+                q = job_coldplug(u->job);
+                if (q < 0 && r >= 0)
+                        r = q;
+        }
+        if (u->nop_job) {
+                q = job_coldplug(u->nop_job);
                 if (q < 0 && r >= 0)
                         r = q;
         }
@@ -3611,6 +3640,8 @@ void unit_catchup(Unit *u) {
 
         if (UNIT_VTABLE(u)->catchup)
                 UNIT_VTABLE(u)->catchup(u);
+
+        unit_cgroup_catchup(u);
 }
 
 static bool fragment_mtime_newer(const char *path, usec_t mtime, bool path_masked) {
@@ -4459,7 +4490,7 @@ static int operation_to_signal(const KillContext *c, KillOperation k, bool *note
                 return c->watchdog_signal;
 
         default:
-                assert_not_reached("KillOperation unknown");
+                assert_not_reached();
         }
 }
 
@@ -4548,7 +4579,7 @@ int unit_kill_context(
                                       log_func, u);
                 if (r < 0) {
                         if (!IN_SET(r, -EAGAIN, -ESRCH, -ENOENT))
-                                log_unit_warning_errno(u, r, "Failed to kill control group %s, ignoring: %m", u->cgroup_path);
+                                log_unit_warning_errno(u, r, "Failed to kill control group %s, ignoring: %m", empty_to_root(u->cgroup_path));
 
                 } else if (r > 0) {
 
@@ -5006,7 +5037,7 @@ int unit_fork_helper_process(Unit *u, const char *name, pid_t *ret) {
         if (u->cgroup_path) {
                 r = cg_attach_everywhere(u->manager->cgroup_supported, u->cgroup_path, 0, NULL, NULL);
                 if (r < 0) {
-                        log_unit_error_errno(u, r, "Failed to join unit cgroup %s: %m", u->cgroup_path);
+                        log_unit_error_errno(u, r, "Failed to join unit cgroup %s: %m", empty_to_root(u->cgroup_path));
                         _exit(EXIT_CGROUP);
                 }
         }
@@ -5497,9 +5528,18 @@ const char *unit_label_path(const Unit *u) {
         /* Returns the file system path to use for MAC access decisions, i.e. the file to read the SELinux label off
          * when validating access checks. */
 
+        if (IN_SET(u->load_state, UNIT_MASKED, UNIT_NOT_FOUND, UNIT_MERGED))
+                return NULL; /* Shortcut things if we know there is no real, relevant unit file around */
+
         p = u->source_path ?: u->fragment_path;
         if (!p)
                 return NULL;
+
+        if (IN_SET(u->load_state, UNIT_LOADED, UNIT_BAD_SETTING, UNIT_ERROR))
+                return p; /* Shortcut things, if we successfully loaded at least some stuff from the unit file */
+
+        /* Not loaded yet, we need to go to disk */
+        assert(u->load_state == UNIT_STUB);
 
         /* If a unit is masked, then don't read the SELinux label of /dev/null, as that really makes no sense */
         if (null_or_empty_path(p) > 0)
@@ -5804,6 +5844,25 @@ int unit_freeze_vtable_common(Unit *u) {
 
 int unit_thaw_vtable_common(Unit *u) {
         return unit_cgroup_freezer_action(u, FREEZER_THAW);
+}
+
+Condition *unit_find_failed_condition(Unit *u) {
+        Condition *c, *failed_trigger = NULL;
+        bool has_succeeded_trigger = false;
+
+        if (u->condition_result)
+                return NULL;
+
+        LIST_FOREACH(conditions, c, u->conditions)
+                if (c->trigger) {
+                        if (c->result == CONDITION_SUCCEEDED)
+                                 has_succeeded_trigger = true;
+                        else if (!failed_trigger)
+                                 failed_trigger = c;
+                } else if (c->result != CONDITION_SUCCEEDED)
+                        return c;
+
+        return failed_trigger && !has_succeeded_trigger ? failed_trigger : NULL;
 }
 
 static const char* const collect_mode_table[_COLLECT_MODE_MAX] = {

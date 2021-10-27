@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <linux/oom.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/reboot.h>
@@ -21,6 +22,9 @@
 #include "alloc-util.h"
 #include "apparmor-setup.h"
 #include "architecture.h"
+#if HAVE_LIBBPF
+#include "bpf-lsm.h"
+#endif
 #include "build.h"
 #include "bus-error.h"
 #include "bus-util.h"
@@ -83,6 +87,7 @@
 #include "switch-root.h"
 #include "sysctl-util.h"
 #include "terminal-util.h"
+#include "time-util.h"
 #include "umask-util.h"
 #include "user-util.h"
 #include "util.h"
@@ -159,6 +164,8 @@ static NUMAPolicy arg_numa_policy;
 static usec_t arg_clock_usec;
 static void *arg_random_seed;
 static size_t arg_random_seed_size;
+static int arg_default_oom_score_adjust;
+static bool arg_default_oom_score_adjust_set;
 
 /* A copy of the original environment block */
 static char **saved_env = NULL;
@@ -215,6 +222,7 @@ _noreturn_ static void freeze_or_exit_or_reboot(void) {
         }
 
         log_emergency("Freezing execution.");
+        sync();
         freeze();
 }
 
@@ -257,7 +265,7 @@ _noreturn_ static void crash(int sig) {
                         pid = raw_getpid();
                         (void) kill(pid, sig); /* raise() would kill the parent */
 
-                        assert_not_reached("We shouldn't be here...");
+                        assert_not_reached();
                         _exit(EXIT_EXCEPTION);
                 } else {
                         siginfo_t status;
@@ -530,6 +538,25 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
                 (void) parse_path_argument(value, false, &arg_watchdog_device);
 
+        } else if (proc_cmdline_key_streq(key, "systemd.watchdog_sec")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
+                if (streq(value, "default"))
+                        arg_runtime_watchdog = USEC_INFINITY;
+                else if (streq(value, "off"))
+                        arg_runtime_watchdog = 0;
+                else {
+                        r = parse_sec(value, &arg_runtime_watchdog);
+                        if (r < 0) {
+                                log_warning_errno(r, "Failed to parse systemd.watchdog_sec= argument '%s', ignoring: %m", value);
+                                return 0;
+                        }
+                }
+
+                arg_kexec_watchdog = arg_reboot_watchdog = arg_runtime_watchdog;
+
         } else if (proc_cmdline_key_streq(key, "systemd.clock_usec")) {
 
                 if (proc_cmdline_value_missing(key, value))
@@ -632,6 +659,37 @@ static int config_parse_default_timeout_abort(
         return 0;
 }
 
+static int config_parse_oom_score_adjust(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        int oa, r;
+
+        if (isempty(rvalue)) {
+                arg_default_oom_score_adjust_set = false;
+                return 0;
+        }
+
+        r = parse_oom_score_adjust(rvalue, &oa);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to parse the OOM score adjust value '%s', ignoring: %m", rvalue);
+                return 0;
+        }
+
+        arg_default_oom_score_adjust = oa;
+        arg_default_oom_score_adjust_set = true;
+
+        return 0;
+}
+
 static int parse_config_file(void) {
         const ConfigTableItem items[] = {
                 { "Manager", "LogLevel",                     config_parse_level2,                0, NULL                                   },
@@ -650,10 +708,10 @@ static int parse_config_file(void) {
                 { "Manager", "NUMAPolicy",                   config_parse_numa_policy,           0, &arg_numa_policy.type                  },
                 { "Manager", "NUMAMask",                     config_parse_numa_mask,             0, &arg_numa_policy                       },
                 { "Manager", "JoinControllers",              config_parse_warn_compat,           DISABLED_CONFIGURATION, NULL              },
-                { "Manager", "RuntimeWatchdogSec",           config_parse_sec,                   0, &arg_runtime_watchdog                  },
-                { "Manager", "RebootWatchdogSec",            config_parse_sec,                   0, &arg_reboot_watchdog                   },
-                { "Manager", "ShutdownWatchdogSec",          config_parse_sec,                   0, &arg_reboot_watchdog                   }, /* obsolete alias */
-                { "Manager", "KExecWatchdogSec",             config_parse_sec,                   0, &arg_kexec_watchdog                    },
+                { "Manager", "RuntimeWatchdogSec",           config_parse_watchdog_sec,          0, &arg_runtime_watchdog                  },
+                { "Manager", "RebootWatchdogSec",            config_parse_watchdog_sec,          0, &arg_reboot_watchdog                   },
+                { "Manager", "ShutdownWatchdogSec",          config_parse_watchdog_sec,          0, &arg_reboot_watchdog                   }, /* obsolete alias */
+                { "Manager", "KExecWatchdogSec",             config_parse_watchdog_sec,          0, &arg_kexec_watchdog                    },
                 { "Manager", "WatchdogDevice",               config_parse_path,                  0, &arg_watchdog_device                   },
                 { "Manager", "CapabilityBoundingSet",        config_parse_capability_set,        0, &arg_capability_bounding_set           },
                 { "Manager", "NoNewPrivileges",              config_parse_bool,                  0, &arg_no_new_privs                      },
@@ -666,7 +724,7 @@ static int parse_config_file(void) {
                 { "Manager", "DefaultStandardError",         config_parse_output_restricted,     0, &arg_default_std_error                 },
                 { "Manager", "DefaultTimeoutStartSec",       config_parse_sec,                   0, &arg_default_timeout_start_usec        },
                 { "Manager", "DefaultTimeoutStopSec",        config_parse_sec,                   0, &arg_default_timeout_stop_usec         },
-                { "Manager", "DefaultTimeoutAbortSec",       config_parse_default_timeout_abort, 0, NULL         },
+                { "Manager", "DefaultTimeoutAbortSec",       config_parse_default_timeout_abort, 0, NULL                                   },
                 { "Manager", "DefaultRestartSec",            config_parse_sec,                   0, &arg_default_restart_usec              },
                 { "Manager", "DefaultStartLimitInterval",    config_parse_sec,                   0, &arg_default_start_limit_interval      }, /* obsolete alias */
                 { "Manager", "DefaultStartLimitIntervalSec", config_parse_sec,                   0, &arg_default_start_limit_interval      },
@@ -698,6 +756,7 @@ static int parse_config_file(void) {
                 { "Manager", "DefaultTasksMax",              config_parse_tasks_max,             0, &arg_default_tasks_max                 },
                 { "Manager", "CtrlAltDelBurstAction",        config_parse_emergency_action,      0, &arg_cad_burst_action                  },
                 { "Manager", "DefaultOOMPolicy",             config_parse_oom_policy,            0, &arg_default_oom_policy                },
+                { "Manager", "DefaultOOMScoreAdjust",        config_parse_oom_score_adjust,      0, NULL                                   },
                 {}
         };
 
@@ -768,6 +827,8 @@ static void set_manager_defaults(Manager *m) {
         m->default_tasks_accounting = arg_default_tasks_accounting;
         m->default_tasks_max = arg_default_tasks_max;
         m->default_oom_policy = arg_default_oom_policy;
+        m->default_oom_score_adjust_set = arg_default_oom_score_adjust_set;
+        m->default_oom_score_adjust = arg_default_oom_score_adjust;
 
         (void) manager_set_default_rlimits(m, arg_default_rlimit);
 
@@ -1080,7 +1141,7 @@ static int parse_argv(int argc, char *argv[]) {
                                 return 0;
 
                 default:
-                        assert_not_reached("Unhandled option code.");
+                        assert_not_reached();
                 }
 
         if (optind < argc && getpid_cached() != 1)
@@ -1482,9 +1543,9 @@ static int become_shutdown(
         };
 
         _cleanup_strv_free_ char **env_block = NULL;
+        usec_t watchdog_timer = 0;
         size_t pos = 7;
         int r;
-        usec_t watchdog_timer = 0;
 
         assert(shutdown_verb);
         assert(!command_line[pos]);
@@ -1533,29 +1594,19 @@ static int become_shutdown(
         else if (streq(shutdown_verb, "kexec"))
                 watchdog_timer = arg_kexec_watchdog;
 
-        if (watchdog_timer > 0 && watchdog_timer != USEC_INFINITY) {
+        /* If we reboot or kexec let's set the shutdown watchdog and tell the
+         * shutdown binary to repeatedly ping it */
+        r = watchdog_setup(watchdog_timer);
+        watchdog_close(r < 0);
 
-                char *e;
+        /* Tell the binary how often to ping, ignore failure */
+        (void) strv_extendf(&env_block, "WATCHDOG_USEC="USEC_FMT, watchdog_timer);
 
-                /* If we reboot or kexec let's set the shutdown
-                 * watchdog and tell the shutdown binary to
-                 * repeatedly ping it */
-                r = watchdog_set_timeout(&watchdog_timer);
-                watchdog_close(r < 0);
+        if (arg_watchdog_device)
+                (void) strv_extendf(&env_block, "WATCHDOG_DEVICE=%s", arg_watchdog_device);
 
-                /* Tell the binary how often to ping, ignore failure */
-                if (asprintf(&e, "WATCHDOG_USEC="USEC_FMT, watchdog_timer) > 0)
-                        (void) strv_consume(&env_block, e);
-
-                if (arg_watchdog_device &&
-                    asprintf(&e, "WATCHDOG_DEVICE=%s", arg_watchdog_device) > 0)
-                        (void) strv_consume(&env_block, e);
-        } else
-                watchdog_close(true);
-
-        /* Avoid the creation of new processes forked by the
-         * kernel; at this point, we will not listen to the
-         * signals anyway */
+        /* Avoid the creation of new processes forked by the kernel; at this
+         * point, we will not listen to the signals anyway */
         if (detect_container() <= 0)
                 (void) cg_uninstall_release_agent(SYSTEMD_CGROUP_CONTROLLER);
 
@@ -1598,11 +1649,18 @@ static void initialize_clock(void) {
                  */
                 (void) clock_reset_timewarp();
 
-        r = clock_apply_epoch();
-        if (r < 0)
-                log_error_errno(r, "Current system time is before build time, but cannot correct: %m");
-        else if (r > 0)
+        ClockChangeDirection change_dir;
+        r = clock_apply_epoch(&change_dir);
+        if (r > 0 && change_dir == CLOCK_CHANGE_FORWARD)
                 log_info("System time before build time, advancing clock.");
+        else if (r > 0 && change_dir == CLOCK_CHANGE_BACKWARD)
+                log_info("System time is further ahead than %s after build time, resetting clock to build time.",
+                         FORMAT_TIMESPAN(CLOCK_VALID_RANGE_USEC_MAX, USEC_PER_DAY));
+        else if (r < 0 && change_dir == CLOCK_CHANGE_FORWARD)
+                log_error_errno(r, "Current system time is before build time, but cannot correct: %m");
+        else if (r < 0 && change_dir == CLOCK_CHANGE_BACKWARD)
+                log_error_errno(r, "Current system time is further ahead %s after build time, but cannot correct: %m",
+                                FORMAT_TIMESPAN(CLOCK_VALID_RANGE_USEC_MAX, USEC_PER_DAY));
 }
 
 static void apply_clock_update(void) {
@@ -1721,9 +1779,14 @@ static void update_numa_policy(bool skip_setup) {
                 log_warning_errno(r, "Failed to set NUMA memory policy: %m");
 }
 
-static void filter_args(const char* dst[], unsigned *pos, char **src, int argc) {
+static void filter_args(
+                const char* dst[],
+                size_t *dst_index,
+                char **src,
+                int argc) {
+
         assert(dst);
-        assert(pos);
+        assert(dst_index);
 
         /* Copy some filtered arguments into the dst array from src. */
         for (int i = 1; i < argc; i++) {
@@ -1757,8 +1820,7 @@ static void filter_args(const char* dst[], unsigned *pos, char **src, int argc) 
                         continue;
 
                 /* Seems we have a good old option. Let's pass it over to the new instance. */
-                dst[*pos] = src[i];
-                (*pos)++;
+                dst[(*dst_index)++] = src[i];
         }
 }
 
@@ -1772,10 +1834,11 @@ static void do_reexecute(
                 const char *switch_root_init,
                 const char **ret_error_message) {
 
-        unsigned i, args_size;
+        size_t i, args_size;
         const char **args;
         int r;
 
+        assert(argc >= 0);
         assert(saved_rlimit_nofile);
         assert(saved_rlimit_memlock);
         assert(ret_error_message);
@@ -2034,7 +2097,7 @@ static int invoke_main_loop(
                 }
 
                 default:
-                        assert_not_reached("Unknown or unexpected manager objective.");
+                        assert_not_reached();
                 }
         }
 }
@@ -2420,6 +2483,35 @@ static void reset_arguments(void) {
         arg_random_seed = mfree(arg_random_seed);
         arg_random_seed_size = 0;
         arg_clock_usec = 0;
+
+        arg_default_oom_score_adjust_set = false;
+}
+
+static void determine_default_oom_score_adjust(void) {
+        int r, a, b;
+
+        /* Run our services at slightly higher OOM score than ourselves. But let's be conservative here, and
+         * do this only if we don't run as root (i.e. only if we are run in user mode, for an unprivileged
+         * user). */
+
+        if (arg_default_oom_score_adjust_set)
+                return;
+
+        if (getuid() == 0)
+                return;
+
+        r = get_oom_score_adjust(&a);
+        if (r < 0)
+                return (void) log_warning_errno(r, "Failed to determine current OOM score adjustment value, ignoring: %m");
+
+        assert_cc(100 <= OOM_SCORE_ADJ_MAX);
+        b = a >= OOM_SCORE_ADJ_MAX - 100 ? OOM_SCORE_ADJ_MAX : a + 100;
+
+        if (a == b)
+                return;
+
+        arg_default_oom_score_adjust = b;
+        arg_default_oom_score_adjust_set = true;
 }
 
 static int parse_configuration(const struct rlimit *saved_rlimit_nofile,
@@ -2453,8 +2545,14 @@ static int parse_configuration(const struct rlimit *saved_rlimit_nofile,
         if (arg_show_status == _SHOW_STATUS_INVALID)
                 arg_show_status = SHOW_STATUS_YES;
 
+        /* Slightly raise the OOM score for our services if we are running for unprivileged users. */
+        determine_default_oom_score_adjust();
+
         /* Push variables into the manager environment block */
         setenv_manager_environment();
+
+        /* Parse log environment variables again to take into account any new environment variables. */
+        log_parse_environment();
 
         return 0;
 }
@@ -2895,7 +2993,7 @@ int main(int argc, char *argv[]) {
 
         before_startup = now(CLOCK_MONOTONIC);
 
-        r = manager_startup(m, arg_serialization, fds);
+        r = manager_startup(m, arg_serialization, fds, /* root= */ NULL);
         if (r < 0) {
                 error_message = "Failed to start up manager";
                 goto finish;

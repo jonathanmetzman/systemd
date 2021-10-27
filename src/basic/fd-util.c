@@ -433,11 +433,9 @@ bool fdname_is_valid(const char *s) {
 }
 
 int fd_get_path(int fd, char **ret) {
-        char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
         int r;
 
-        xsprintf(procfs_path, "/proc/self/fd/%i", fd);
-        r = readlink_malloc(procfs_path, ret);
+        r = readlink_malloc(FORMAT_PROC_FD_PATH(fd), ret);
         if (r == -ENOENT) {
                 /* ENOENT can mean two things: that the fd does not exist or that /proc is not mounted. Let's make
                  * things debuggable and distinguish the two. */
@@ -647,8 +645,7 @@ finish:
 }
 
 int fd_reopen(int fd, int flags) {
-        char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
-        int new_fd;
+        int new_fd, r;
 
         /* Reopens the specified fd with new flags. This is useful for convert an O_PATH fd into a regular one, or to
          * turn O_RDWR fds into O_RDONLY fds.
@@ -657,16 +654,28 @@ int fd_reopen(int fd, int flags) {
          *
          * This implicitly resets the file read index to 0. */
 
-        xsprintf(procfs_path, "/proc/self/fd/%i", fd);
-        new_fd = open(procfs_path, flags);
+        if (FLAGS_SET(flags, O_DIRECTORY)) {
+                /* If we shall reopen the fd as directory we can just go via "." and thus bypass the whole
+                 * magic /proc/ directory, and make ourselves independent of that being mounted. */
+                new_fd = openat(fd, ".", flags);
+                if (new_fd < 0)
+                        return -errno;
+
+                return new_fd;
+        }
+
+        new_fd = open(FORMAT_PROC_FD_PATH(fd), flags);
         if (new_fd < 0) {
                 if (errno != ENOENT)
                         return -errno;
 
-                if (proc_mounted() == 0)
+                r = proc_mounted();
+                if (r == 0)
                         return -ENOSYS; /* if we have no /proc/, the concept is not implementable */
 
-                return -ENOENT;
+                return r > 0 ? -EBADF : -ENOENT; /* If /proc/ is definitely around then this means the fd is
+                                                  * not valid, otherwise let's propagate the original
+                                                  * error */
         }
 
         return new_fd;

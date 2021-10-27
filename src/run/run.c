@@ -111,7 +111,7 @@ static int help(void) {
                "     --nice=NICE                  Nice level\n"
                "     --working-directory=PATH     Set working directory\n"
                "  -d --same-dir                   Inherit working directory from caller\n"
-               "  -E --setenv=NAME=VALUE          Set environment\n"
+               "  -E --setenv=NAME[=VALUE]        Set environment variable\n"
                "  -t --pty                        Run service on pseudo TTY as STDIN/STDOUT/\n"
                "                                  STDERR\n"
                "  -P --pipe                       Pass STDIN/STDOUT/STDERR directly to service\n"
@@ -322,8 +322,9 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 'E':
-                        if (strv_extend(&arg_environment, optarg) < 0)
-                                return log_oom();
+                        r = strv_env_replace_strdup_passthrough(&arg_environment, optarg);
+                        if (r < 0)
+                                return log_error_errno(r, "Cannot assign environment variable %s: %m", optarg);
 
                         break;
 
@@ -503,8 +504,12 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
+
+        /* If we are talking to the per-user instance PolicyKit isn't going to help */
+        if (arg_user)
+                arg_ask_password = false;
 
         with_trigger = !!arg_path_property || !!arg_socket_property || arg_with_timer;
 
@@ -1155,7 +1160,7 @@ static int start_transient_service(
                         if (!pty_path)
                                 return log_oom();
                 } else
-                        assert_not_reached("Can't allocate tty via ssh");
+                        assert_not_reached();
         }
 
         /* Optionally, wait for the start job to complete. If we are supposed to read the service's stdin
@@ -1526,7 +1531,7 @@ static int start_transient_scope(sd_bus *bus) {
                         return log_error_errno(errno, "Failed to change UID to " UID_FMT ": %m", uid);
         }
 
-        env = strv_env_merge(3, environ, user_env, arg_environment);
+        env = strv_env_merge(environ, user_env, arg_environment);
         if (!env)
                 return log_oom();
 
@@ -1628,7 +1633,7 @@ static int start_transient_trigger(
         else if (streq(suffix, ".timer"))
                 r = transient_timer_set_properties(m);
         else
-                assert_not_reached("Invalid suffix");
+                assert_not_reached();
         if (r < 0)
                 return r;
 
@@ -1709,6 +1714,7 @@ static int run(int argc, char* argv[]) {
         if (!strv_isempty(arg_cmdline) &&
             arg_transport == BUS_TRANSPORT_LOCAL &&
             !strv_find_startswith(arg_property, "RootDirectory=") &&
+            !strv_find_startswith(arg_property, "ExecSearchPath=") &&
             !strv_find_startswith(arg_property, "RootImage=")) {
                 /* Patch in an absolute path to fail early for user convenience, but only when we can do it
                  * (i.e. we will be running from the same file system). This also uses the user's $PATH,

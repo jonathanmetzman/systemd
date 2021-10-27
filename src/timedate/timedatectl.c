@@ -77,7 +77,7 @@ static int print_status_info(const StatusInfo *i) {
         /* Save the old $TZ */
         tz = getenv("TZ");
         if (tz)
-                old_tz = strdupa(tz);
+                old_tz = strdupa_safe(tz);
 
         /* Set the new $TZ */
         tz_colon = strjoina(":", isempty(i->timezone) ? "UTC" : i->timezone);
@@ -999,7 +999,7 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
 
         return 1;

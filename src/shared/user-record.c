@@ -3,6 +3,7 @@
 #include <sys/mount.h>
 
 #include "cgroup-util.h"
+#include "chase-symlinks.h"
 #include "dns-domain.h"
 #include "env-util.h"
 #include "fd-util.h"
@@ -54,7 +55,7 @@ int read_login_defs(UGIDAllocationRange *ret_defs, const char *path, const char 
         if (!path)
                 path = "/etc/login.defs";
 
-        r = chase_symlinks_and_fopen_unlocked(path, root, CHASE_PREFIX_ROOT, "re", &f, NULL);
+        r = chase_symlinks_and_fopen_unlocked(path, root, CHASE_PREFIX_ROOT, "re", NULL, &f);
         if (r == -ENOENT)
                 goto assign;
         if (r < 0)
@@ -201,6 +202,7 @@ UserRecord* user_record_new(void) {
                 .pkcs11_protected_authentication_path_permitted = -1,
                 .fido2_user_presence_permitted = -1,
                 .fido2_user_verification_permitted = -1,
+                .drop_caches = -1,
         };
 
         return h;
@@ -1127,7 +1129,6 @@ static int dispatch_binding(const char *name, JsonVariant *variant, JsonDispatch
                 {},
         };
 
-        char smid[SD_ID128_STRING_MAX];
         JsonVariant *m;
         sd_id128_t mid;
         int r;
@@ -1142,7 +1143,7 @@ static int dispatch_binding(const char *name, JsonVariant *variant, JsonDispatch
         if (r < 0)
                 return json_log(variant, flags, r, "Failed to determine machine ID: %m");
 
-        m = json_variant_by_key(variant, sd_id128_to_string(mid, smid));
+        m = json_variant_by_key(variant, SD_ID128_TO_STRING(mid));
         if (!m)
                 return 0;
 
@@ -1284,6 +1285,7 @@ static int dispatch_per_machine(const char *name, JsonVariant *variant, JsonDisp
                 { "luksPbkdfTimeCostUSec",      JSON_VARIANT_UNSIGNED,      json_dispatch_uint64,                 offsetof(UserRecord, luks_pbkdf_time_cost_usec),     0         },
                 { "luksPbkdfMemoryCost",        JSON_VARIANT_UNSIGNED,      json_dispatch_uint64,                 offsetof(UserRecord, luks_pbkdf_memory_cost),        0         },
                 { "luksPbkdfParallelThreads",   JSON_VARIANT_UNSIGNED,      json_dispatch_uint64,                 offsetof(UserRecord, luks_pbkdf_parallel_threads),   0         },
+                { "dropCaches",                 JSON_VARIANT_BOOLEAN,       json_dispatch_tristate,               offsetof(UserRecord, drop_caches),                   0         },
                 { "rateLimitIntervalUSec",      JSON_VARIANT_UNSIGNED,      json_dispatch_uint64,                 offsetof(UserRecord, ratelimit_interval_usec),       0         },
                 { "rateLimitBurst",             JSON_VARIANT_UNSIGNED,      json_dispatch_uint64,                 offsetof(UserRecord, ratelimit_burst),               0         },
                 { "enforcePasswordPolicy",      JSON_VARIANT_BOOLEAN,       json_dispatch_tristate,               offsetof(UserRecord, enforce_password_policy),       0         },
@@ -1368,7 +1370,6 @@ static int dispatch_status(const char *name, JsonVariant *variant, JsonDispatchF
                 {},
         };
 
-        char smid[SD_ID128_STRING_MAX];
         JsonVariant *m;
         sd_id128_t mid;
         int r;
@@ -1383,7 +1384,7 @@ static int dispatch_status(const char *name, JsonVariant *variant, JsonDispatchF
         if (r < 0)
                 return json_log(variant, flags, r, "Failed to determine machine ID: %m");
 
-        m = json_variant_by_key(variant, sd_id128_to_string(mid, smid));
+        m = json_variant_by_key(variant, SD_ID128_TO_STRING(mid));
         if (!m)
                 return 0;
 
@@ -1407,11 +1408,11 @@ int user_record_build_image_path(UserStorage storage, const char *user_name_and_
                 return 0;
         }
 
-        z = strjoin("/home/", user_name_and_realm, suffix);
+        z = strjoin(get_home_root(), "/", user_name_and_realm, suffix);
         if (!z)
                 return -ENOMEM;
 
-        *ret = z;
+        *ret = path_simplify(z);
         return 1;
 }
 
@@ -1436,7 +1437,7 @@ static int user_record_augment(UserRecord *h, JsonDispatchFlags json_flags) {
                 return 0;
 
         if (!h->home_directory && !h->home_directory_auto) {
-                h->home_directory_auto = path_join("/home/", h->user_name);
+                h->home_directory_auto = path_join(get_home_root(), h->user_name);
                 if (!h->home_directory_auto)
                         return json_log_oom(h->json, json_flags);
         }
@@ -1621,7 +1622,7 @@ int user_record_load(UserRecord *h, JsonVariant *v, UserRecordLoadFlags load_fla
                 { "luksUuid",                   JSON_VARIANT_STRING,        json_dispatch_id128,                  offsetof(UserRecord, luks_uuid),                     0         },
                 { "fileSystemUuid",             JSON_VARIANT_STRING,        json_dispatch_id128,                  offsetof(UserRecord, file_system_uuid),              0         },
                 { "luksDiscard",                _JSON_VARIANT_TYPE_INVALID, json_dispatch_tristate,               offsetof(UserRecord, luks_discard),                  0         },
-                { "luksOfflineDiscard",         _JSON_VARIANT_TYPE_INVALID, json_dispatch_tristate,            offsetof(UserRecord, luks_offline_discard),          0         },
+                { "luksOfflineDiscard",         _JSON_VARIANT_TYPE_INVALID, json_dispatch_tristate,               offsetof(UserRecord, luks_offline_discard),          0         },
                 { "luksCipher",                 JSON_VARIANT_STRING,        json_dispatch_string,                 offsetof(UserRecord, luks_cipher),                   JSON_SAFE },
                 { "luksCipherMode",             JSON_VARIANT_STRING,        json_dispatch_string,                 offsetof(UserRecord, luks_cipher_mode),              JSON_SAFE },
                 { "luksVolumeKeySize",          JSON_VARIANT_UNSIGNED,      json_dispatch_uint64,                 offsetof(UserRecord, luks_volume_key_size),          0         },
@@ -1630,6 +1631,7 @@ int user_record_load(UserRecord *h, JsonVariant *v, UserRecordLoadFlags load_fla
                 { "luksPbkdfTimeCostUSec",      JSON_VARIANT_UNSIGNED,      json_dispatch_uint64,                 offsetof(UserRecord, luks_pbkdf_time_cost_usec),     0         },
                 { "luksPbkdfMemoryCost",        JSON_VARIANT_UNSIGNED,      json_dispatch_uint64,                 offsetof(UserRecord, luks_pbkdf_memory_cost),        0         },
                 { "luksPbkdfParallelThreads",   JSON_VARIANT_UNSIGNED,      json_dispatch_uint64,                 offsetof(UserRecord, luks_pbkdf_parallel_threads),   0         },
+                { "dropCaches",                 JSON_VARIANT_BOOLEAN,       json_dispatch_tristate,               offsetof(UserRecord, drop_caches),                   0         },
                 { "service",                    JSON_VARIANT_STRING,        json_dispatch_string,                 offsetof(UserRecord, service),                       JSON_SAFE },
                 { "rateLimitIntervalUSec",      JSON_VARIANT_UNSIGNED,      json_dispatch_uint64,                 offsetof(UserRecord, ratelimit_interval_usec),       0         },
                 { "rateLimitBurst",             JSON_VARIANT_UNSIGNED,      json_dispatch_uint64,                 offsetof(UserRecord, ratelimit_burst),               0         },
@@ -1895,7 +1897,7 @@ uint64_t user_record_luks_volume_key_size(UserRecord *h) {
 const char* user_record_luks_pbkdf_type(UserRecord *h) {
         assert(h);
 
-        return h->luks_pbkdf_type ?: "argon2i";
+        return h->luks_pbkdf_type ?: "argon2id";
 }
 
 uint64_t user_record_luks_pbkdf_time_cost_usec(UserRecord *h) {
@@ -1913,9 +1915,9 @@ uint64_t user_record_luks_pbkdf_memory_cost(UserRecord *h) {
         assert(h);
 
         /* Returns a value with kb granularity, since that's what libcryptsetup expects */
-
         if (h->luks_pbkdf_memory_cost == UINT64_MAX)
-                return 64*1024*1024; /* We default to 64M, since this should work on smaller systems too */
+                return streq(user_record_luks_pbkdf_type(h), "pbkdf2") ? 0 : /* doesn't apply for simple pbkdf2 */
+                        64*1024*1024; /* We default to 64M, since this should work on smaller systems too */
 
         return MIN(DIV_ROUND_UP(h->luks_pbkdf_memory_cost, 1024), UINT32_MAX) * 1024;
 }
@@ -1923,8 +1925,9 @@ uint64_t user_record_luks_pbkdf_memory_cost(UserRecord *h) {
 uint64_t user_record_luks_pbkdf_parallel_threads(UserRecord *h) {
         assert(h);
 
-        if (h->luks_pbkdf_memory_cost == UINT64_MAX)
-                return 1; /* We default to 1, since this should work on smaller systems too */
+        if (h->luks_pbkdf_parallel_threads == UINT64_MAX)
+                return streq(user_record_luks_pbkdf_type(h), "pbkdf2") ? 0 : /* doesn't apply for simple pbkdf2 */
+                        1; /* We default to 1, since this should work on smaller systems too */
 
         return MIN(h->luks_pbkdf_parallel_threads, UINT32_MAX);
 }
@@ -2019,6 +2022,16 @@ bool user_record_can_authenticate(UserRecord *h) {
                 return true;
 
         return !strv_isempty(h->hashed_password);
+}
+
+bool user_record_drop_caches(UserRecord *h) {
+        assert(h);
+
+        if (h->drop_caches >= 0)
+                return h->drop_caches;
+
+        /* By default drop caches on fscrypt, not otherwise. */
+        return user_record_storage(h) == USER_FSCRYPT;
 }
 
 uint64_t user_record_ratelimit_next_try(UserRecord *h) {

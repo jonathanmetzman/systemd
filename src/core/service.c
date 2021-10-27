@@ -12,6 +12,7 @@
 #include "bus-error.h"
 #include "bus-kernel.h"
 #include "bus-util.h"
+#include "chase-symlinks.h"
 #include "dbus-service.h"
 #include "dbus-unit.h"
 #include "def.h"
@@ -21,7 +22,6 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-util.h"
-#include "fs-util.h"
 #include "load-dropin.h"
 #include "load-fragment.h"
 #include "log.h"
@@ -29,6 +29,7 @@
 #include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
+#include "random-util.h"
 #include "serialize.h"
 #include "service.h"
 #include "signal-util.h"
@@ -514,6 +515,21 @@ static void service_remove_fd_store(Service *s, const char *name) {
         }
 }
 
+static usec_t service_running_timeout(Service *s) {
+        usec_t delta = 0;
+
+        assert(s);
+
+        if (s->runtime_rand_extra_usec != 0) {
+                delta = random_u64_range(s->runtime_rand_extra_usec);
+                log_unit_debug(UNIT(s), "Adding delta of %s sec to timeout", FORMAT_TIMESPAN(delta, USEC_PER_SEC));
+        }
+
+        return usec_add(usec_add(UNIT(s)->active_enter_timestamp.monotonic,
+                                 s->runtime_max_usec),
+                        delta);
+}
+
 static int service_arm_timer(Service *s, usec_t usec) {
         int r;
 
@@ -547,6 +563,22 @@ static int service_arm_timer(Service *s, usec_t usec) {
 static int service_verify(Service *s) {
         assert(s);
         assert(UNIT(s)->load_state == UNIT_LOADED);
+
+        for (ServiceExecCommand c = 0; c < _SERVICE_EXEC_COMMAND_MAX; c++) {
+                ExecCommand *command;
+
+                LIST_FOREACH(command, command, s->exec_command[c]) {
+                        if (!path_is_absolute(command->path) && !filename_is_valid(command->path))
+                                return log_unit_error_errno(UNIT(s), SYNTHETIC_ERRNO(ENOEXEC),
+                                                            "Service %s= binary path \"%s\" is neither a valid executable name nor an absolute path. Refusing.",
+                                                            command->path,
+                                                            service_exec_command_to_string(c));
+                        if (strv_isempty(command->argv))
+                                return log_unit_error_errno(UNIT(s), SYNTHETIC_ERRNO(ENOEXEC),
+                                                            "Service has an empty argv in %s=. Refusing.",
+                                                            service_exec_command_to_string(c));
+                }
+        }
 
         if (!s->exec_command[SERVICE_EXEC_START] && !s->exec_command[SERVICE_EXEC_STOP] &&
             UNIT(s)->success_action == EMERGENCY_ACTION_NONE)
@@ -586,6 +618,9 @@ static int service_verify(Service *s) {
 
         if (s->runtime_max_usec != USEC_INFINITY && s->type == SERVICE_ONESHOT)
                 log_unit_warning(UNIT(s), "RuntimeMaxSec= has no effect in combination with Type=oneshot. Ignoring.");
+
+        if (s->runtime_max_usec == USEC_INFINITY && s->runtime_rand_extra_usec != 0)
+                log_unit_warning(UNIT(s), "Service has RuntimeRandomizedExtraSec= setting, but no RuntimeMaxSec=. Ignoring.");
 
         return 0;
 }
@@ -855,8 +890,10 @@ static void service_dump(Unit *u, FILE *f, const char *prefix) {
 
         fprintf(f,
                 "%sRuntimeMaxSec: %s\n"
+                "%sRuntimeRandomizedExtraSec: %s\n"
                 "%sWatchdogSec: %s\n",
                 prefix, FORMAT_TIMESPAN(s->runtime_max_usec, USEC_PER_SEC),
+                prefix, FORMAT_TIMESPAN(s->runtime_rand_extra_usec, USEC_PER_SEC),
                 prefix, FORMAT_TIMESPAN(s->watchdog_usec, USEC_PER_SEC));
 
         kill_context_dump(&s->kill_context, f, prefix);
@@ -916,7 +953,6 @@ static int service_is_suitable_main_pid(Service *s, pid_t pid, int prio) {
 }
 
 static int service_load_pid_file(Service *s, bool may_warn) {
-        char procfs[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
         bool questionable_pid_file = false;
         _cleanup_free_ char *k = NULL;
         _cleanup_close_ int fd = -1;
@@ -945,8 +981,7 @@ static int service_load_pid_file(Service *s, bool may_warn) {
 
         /* Let's read the PID file now that we chased it down. But we need to convert the O_PATH fd
          * chase_symlinks() returned us into a proper fd first. */
-        xsprintf(procfs, "/proc/self/fd/%i", fd);
-        r = read_one_line_file(procfs, &k);
+        r = read_one_line_file(FORMAT_PROC_FD_PATH(fd), &k);
         if (r < 0)
                 return log_unit_error_errno(UNIT(s), r,
                                             "Can't convert PID files %s O_PATH file descriptor to proper file descriptor: %m",
@@ -1120,7 +1155,7 @@ static usec_t service_coldplug_timeout(Service *s) {
                 return usec_add(UNIT(s)->state_change_timestamp.monotonic, s->timeout_start_usec);
 
         case SERVICE_RUNNING:
-                return usec_add(UNIT(s)->active_enter_timestamp.monotonic, s->runtime_max_usec);
+                return service_running_timeout(s);
 
         case SERVICE_STOP:
         case SERVICE_STOP_SIGTERM:
@@ -1546,7 +1581,7 @@ static int service_spawn(
         if (r < 0)
                 return r;
 
-        final_env = strv_env_merge(2, exec_params.environment, our_env, NULL);
+        final_env = strv_env_merge(exec_params.environment, our_env);
         if (!final_env)
                 return -ENOMEM;
 
@@ -1683,7 +1718,7 @@ static bool service_shall_restart(Service *s, const char **reason) {
                 return IN_SET(s->result, SERVICE_FAILURE_SIGNAL, SERVICE_FAILURE_CORE_DUMP);
 
         default:
-                assert_not_reached("unknown restart setting");
+                assert_not_reached();
         }
 }
 
@@ -1991,7 +2026,7 @@ static void service_enter_running(Service *s, ServiceResult f) {
                         service_enter_stop_by_notify(s);
                 else {
                         service_set_state(s, SERVICE_RUNNING);
-                        service_arm_timer(s, usec_add(UNIT(s)->active_enter_timestamp.monotonic, s->runtime_max_usec));
+                        service_arm_timer(s, service_running_timeout(s));
                 }
 
         } else if (s->remain_after_exit)
@@ -2157,7 +2192,7 @@ static void service_enter_start(Service *s) {
                 service_set_main_pid(s, pid);
                 service_set_state(s, SERVICE_START);
         } else
-                assert_not_reached("Unknown service type");
+                assert_not_reached();
 
         return;
 
@@ -2437,13 +2472,6 @@ static int service_start(Unit *u) {
                 return -EAGAIN;
 
         assert(IN_SET(s->state, SERVICE_DEAD, SERVICE_FAILED));
-
-        /* Make sure we don't enter a busy loop of some kind. */
-        r = unit_test_start_limit(u);
-        if (r < 0) {
-                service_enter_dead(s, SERVICE_FAILURE_START_LIMIT_HIT, false);
-                return r;
-        }
 
         r = unit_acquire_invocation_id(u);
         if (r < 0)
@@ -2780,7 +2808,7 @@ int service_deserialize_exec_command(
                                 return -ENOMEM;
                         break;
                 default:
-                        assert_not_reached("Logic error in exec command deserialization");
+                        assert_not_reached();
                 }
         }
 
@@ -3392,7 +3420,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
         else if (code == CLD_DUMPED)
                 f = SERVICE_FAILURE_CORE_DUMP;
         else
-                assert_not_reached("Unknown code");
+                assert_not_reached();
 
         if (s->main_pid == pid) {
                 /* Clean up the exec_fd event source. We want to do this here, not later in
@@ -3523,7 +3551,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                                 break;
 
                         default:
-                                assert_not_reached("Uh, main process died at wrong time.");
+                                assert_not_reached();
                         }
                 }
 
@@ -3701,7 +3729,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                                 break;
 
                         default:
-                                assert_not_reached("Uh, control process died at wrong time.");
+                                assert_not_reached();
                         }
                 }
         } else /* Neither control nor main PID? If so, don't notify about anything */
@@ -3756,7 +3784,7 @@ static int service_dispatch_timer(sd_event_source *source, usec_t usec, void *us
                         break;
 
                 default:
-                        assert_not_reached("unknown timeout mode");
+                        assert_not_reached();
                 }
                 break;
 
@@ -3796,7 +3824,7 @@ static int service_dispatch_timer(sd_event_source *source, usec_t usec, void *us
                         break;
 
                 default:
-                        assert_not_reached("unknown timeout mode");
+                        assert_not_reached();
                 }
                 break;
 
@@ -3857,7 +3885,7 @@ static int service_dispatch_timer(sd_event_source *source, usec_t usec, void *us
                         break;
 
                 default:
-                        assert_not_reached("unknown timeout mode");
+                        assert_not_reached();
                 }
                 break;
 
@@ -3912,7 +3940,7 @@ static int service_dispatch_timer(sd_event_source *source, usec_t usec, void *us
                 break;
 
         default:
-                assert_not_reached("Timeout at wrong time.");
+                assert_not_reached();
         }
 
         return 0;
@@ -4447,6 +4475,22 @@ static const char *service_finished_job(Unit *u, JobType t, JobResult result) {
         return NULL;
 }
 
+static int service_test_start_limit(Unit *u) {
+        Service *s = SERVICE(u);
+        int r;
+
+        assert(s);
+
+        /* Make sure we don't enter a busy loop of some kind. */
+        r = unit_test_start_limit(u);
+        if (r < 0) {
+                service_enter_dead(s, SERVICE_FAILURE_START_LIMIT_HIT, false);
+                return r;
+        }
+
+        return 0;
+}
+
 static const char* const service_restart_table[_SERVICE_RESTART_MAX] = {
         [SERVICE_RESTART_NO]          = "no",
         [SERVICE_RESTART_ON_SUCCESS]  = "on-success",
@@ -4610,4 +4654,6 @@ const UnitVTable service_vtable = {
                 },
                 .finished_job = service_finished_job,
         },
+
+        .test_start_limit = service_test_start_limit,
 };

@@ -22,6 +22,7 @@
 #include "blkid-util.h"
 #include "blockdev-util.h"
 #include "btrfs-util.h"
+#include "chase-symlinks.h"
 #include "conf-files.h"
 #include "conf-parser.h"
 #include "cryptsetup-util.h"
@@ -34,12 +35,12 @@
 #include "format-table.h"
 #include "format-util.h"
 #include "fs-util.h"
+#include "glyph-util.h"
 #include "gpt.h"
 #include "hexdecoct.h"
 #include "id128-util.h"
 #include "json.h"
 #include "list.h"
-#include "locale-util.h"
 #include "loop-util.h"
 #include "main-func.h"
 #include "mkdir.h"
@@ -61,6 +62,7 @@
 #include "string-table.h"
 #include "string-util.h"
 #include "strv.h"
+#include "sync-util.h"
 #include "terminal-util.h"
 #include "tpm2-util.h"
 #include "user-util.h"
@@ -206,7 +208,12 @@ static const char *encrypt_mode_table[_ENCRYPT_MODE_MAX] = {
         [ENCRYPT_KEY_FILE_TPM2] = "key-file+tpm2",
 };
 
+#if HAVE_LIBCRYPTSETUP
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP_WITH_BOOLEAN(encrypt_mode, EncryptMode, ENCRYPT_KEY_FILE);
+#else
+DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING_WITH_BOOLEAN(encrypt_mode, EncryptMode, ENCRYPT_KEY_FILE);
+#endif
+
 
 static uint64_t round_down_size(uint64_t v, uint64_t p) {
         return (v / p) * p;
@@ -899,7 +906,8 @@ static void context_place_partitions(Context *context) {
 
         for (size_t i = 0; i < context->n_free_areas; i++) {
                 FreeArea *a = context->free_areas[i];
-                uint64_t start, left;
+                _unused_ uint64_t left;
+                uint64_t start;
 
                 if (a->after) {
                         assert(a->after->offset != UINT64_MAX);
@@ -1581,12 +1589,8 @@ static int context_load_partition_table(
          * /proc/self/fd/ magic path if we have an existing fd. Open the original file otherwise. */
         if (*backing_fd < 0)
                 r = fdisk_assign_device(c, node, arg_dry_run);
-        else {
-                char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
-                xsprintf(procfs_path, "/proc/self/fd/%i", *backing_fd);
-
-                r = fdisk_assign_device(c, procfs_path, arg_dry_run);
-        }
+        else
+                r = fdisk_assign_device(c, FORMAT_PROC_FD_PATH(*backing_fd), arg_dry_run);
         if (r == -EINVAL && arg_size_auto) {
                 struct stat st;
 
@@ -2119,7 +2123,6 @@ static void context_bar_char_process_partition(
 
 static int partition_hint(const Partition *p, const char *node, char **ret) {
         _cleanup_free_ char *buf = NULL;
-        char ids[ID128_UUID_STRING_MAX];
         const char *label;
         sd_id128_t id;
 
@@ -2148,7 +2151,7 @@ static int partition_hint(const Partition *p, const char *node, char **ret) {
         else
                 id = p->type_uuid;
 
-        buf = strdup(id128_to_uuid_string(id, ids));
+        buf = strdup(ID128_TO_UUID_STRING(id));
 
 done:
         if (!buf)
@@ -2548,7 +2551,6 @@ static int partition_encrypt(
         _cleanup_(sym_crypt_freep) struct crypt_device *cd = NULL;
         _cleanup_(erase_and_freep) void *volume_key = NULL;
         _cleanup_free_ char *dm_name = NULL, *vol = NULL;
-        char suuid[ID128_UUID_STRING_MAX];
         size_t volume_key_size = 256 / 8;
         sd_id128_t uuid;
         int r;
@@ -2595,7 +2597,7 @@ static int partition_encrypt(
                          CRYPT_LUKS2,
                          "aes",
                          "xts-plain64",
-                         id128_to_uuid_string(uuid, suuid),
+                         ID128_TO_UUID_STRING(uuid),
                          volume_key,
                          volume_key_size,
                          &(struct crypt_params_luks2) {
@@ -2624,9 +2626,10 @@ static int partition_encrypt(
                 _cleanup_(erase_and_freep) void *secret = NULL;
                 _cleanup_free_ void *blob = NULL, *hash = NULL;
                 size_t secret_size, blob_size, hash_size;
+                uint16_t pcr_bank, primary_alg;
                 int keyslot;
 
-                r = tpm2_seal(arg_tpm2_device, arg_tpm2_pcr_mask, &secret, &secret_size, &blob, &blob_size, &hash, &hash_size);
+                r = tpm2_seal(arg_tpm2_device, arg_tpm2_pcr_mask, &secret, &secret_size, &blob, &blob_size, &hash, &hash_size, &pcr_bank, &primary_alg);
                 if (r < 0)
                         return log_error_errno(r, "Failed to seal to TPM2: %m");
 
@@ -2648,7 +2651,7 @@ static int partition_encrypt(
                 if (keyslot < 0)
                         return log_error_errno(keyslot, "Failed to add new TPM2 key to %s: %m", node);
 
-                r = tpm2_make_luks2_json(keyslot, arg_tpm2_pcr_mask, blob, blob_size, hash, hash_size, &v);
+                r = tpm2_make_luks2_json(keyslot, arg_tpm2_pcr_mask, pcr_bank, primary_alg, blob, blob_size, hash, hash_size, &v);
                 if (r < 0)
                         return log_error_errno(r, "Failed to prepare TPM2 JSON token object: %m");
 
@@ -2778,7 +2781,7 @@ static int context_copy_blocks(Context *context) {
                         return log_error_errno(r, "Failed to copy in data from '%s': %m", p->copy_blocks_path);
 
                 if (fsync(target_fd) < 0)
-                        return log_error_errno(r, "Failed to synchronize copied data blocks: %m");
+                        return log_error_errno(errno, "Failed to synchronize copied data blocks: %m");
 
                 if (p->encrypt != ENCRYPT_OFF) {
                         encrypted_dev_fd = safe_close(encrypted_dev_fd);
@@ -2848,13 +2851,13 @@ static int do_copy_files(Partition *p, const char *fs) {
                                                 sfd, ".",
                                                 pfd, fn,
                                                 UID_INVALID, GID_INVALID,
-                                                COPY_REFLINK|COPY_MERGE|COPY_REPLACE|COPY_SIGINT|COPY_HARDLINKS);
+                                                COPY_REFLINK|COPY_MERGE|COPY_REPLACE|COPY_SIGINT|COPY_HARDLINKS|COPY_ALL_XATTRS);
                         } else
                                 r = copy_tree_at(
                                                 sfd, ".",
                                                 tfd, ".",
                                                 UID_INVALID, GID_INVALID,
-                                                COPY_REFLINK|COPY_MERGE|COPY_REPLACE|COPY_SIGINT|COPY_HARDLINKS);
+                                                COPY_REFLINK|COPY_MERGE|COPY_REPLACE|COPY_SIGINT|COPY_HARDLINKS|COPY_ALL_XATTRS);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to copy '%s' to '%s%s': %m", *source, strempty(arg_root), *target);
                 } else {
@@ -2889,7 +2892,7 @@ static int do_copy_files(Partition *p, const char *fs) {
                         if (r < 0)
                                 return log_error_errno(r, "Failed to copy '%s' to '%s%s': %m", *source, strempty(arg_root), *target);
 
-                        (void) copy_xattr(sfd, tfd);
+                        (void) copy_xattr(sfd, tfd, COPY_ALL_XATTRS);
                         (void) copy_access(sfd, tfd);
                         (void) copy_times(sfd, tfd, 0);
                 }
@@ -3054,7 +3057,7 @@ static int context_mkfs(Context *context) {
 
                 if (p->encrypt != ENCRYPT_OFF) {
                         if (fsync(encrypted_dev_fd) < 0)
-                                return log_error_errno(r, "Failed to synchronize LUKS volume: %m");
+                                return log_error_errno(errno, "Failed to synchronize LUKS volume: %m");
                         encrypted_dev_fd = safe_close(encrypted_dev_fd);
 
                         r = deactivate_luks(cd, encrypted);
@@ -3343,11 +3346,9 @@ static int context_mangle_partitions(Context *context) {
                         }
 
                         if (!sd_id128_equal(p->new_uuid, p->current_uuid)) {
-                                char buf[ID128_UUID_STRING_MAX];
-
                                 assert(!sd_id128_is_null(p->new_uuid));
 
-                                r = fdisk_partition_set_uuid(p->current_partition, id128_to_uuid_string(p->new_uuid, buf));
+                                r = fdisk_partition_set_uuid(p->current_partition, ID128_TO_UUID_STRING(p->new_uuid));
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to set partition UUID: %m");
 
@@ -3374,7 +3375,6 @@ static int context_mangle_partitions(Context *context) {
                 } else {
                         _cleanup_(fdisk_unref_partitionp) struct fdisk_partition *q = NULL;
                         _cleanup_(fdisk_unref_parttypep) struct fdisk_parttype *t = NULL;
-                        char ids[ID128_UUID_STRING_MAX];
 
                         assert(!p->new_partition);
                         assert(p->offset % 512 == 0);
@@ -3386,7 +3386,7 @@ static int context_mangle_partitions(Context *context) {
                         if (!t)
                                 return log_oom();
 
-                        r = fdisk_parttype_set_typestr(t, id128_to_uuid_string(p->type_uuid, ids));
+                        r = fdisk_parttype_set_typestr(t, ID128_TO_UUID_STRING(p->type_uuid));
                         if (r < 0)
                                 return log_error_errno(r, "Failed to initialize partition type: %m");
 
@@ -3414,7 +3414,7 @@ static int context_mangle_partitions(Context *context) {
                         if (r < 0)
                                 return log_error_errno(r, "Failed to set partition number: %m");
 
-                        r = fdisk_partition_set_uuid(q, id128_to_uuid_string(p->new_uuid, ids));
+                        r = fdisk_partition_set_uuid(q, ID128_TO_UUID_STRING(p->new_uuid));
                         if (r < 0)
                                 return log_error_errno(r, "Failed to set partition UUID: %m");
 
@@ -4346,7 +4346,7 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
 
         if (argc - optind > 1)
@@ -4537,6 +4537,7 @@ static int acquire_root_devno(
 static int find_root(char **ret, int *ret_fd) {
         const char *p;
         int r;
+        _cleanup_free_ char *device = NULL;
 
         assert(ret);
         assert(ret_fd);
@@ -4572,27 +4573,42 @@ static int find_root(char **ret, int *ret_fd) {
 
         assert(IN_SET(arg_empty, EMPTY_REFUSE, EMPTY_ALLOW));
 
-        /* Let's search for the root device. We look for two cases here: first in /, and then in /usr. The
-         * latter we check for cases where / is a tmpfs and only /usr is an actual persistent block device
-         * (think: volatile setups) */
+        /* If the root mount has been replaced by some form of volatile file system (overlayfs), the
+         * original root block device node is symlinked in /run/systemd/volatile-root. Let's read that
+         * here. */
+        r = readlink_malloc("/run/systemd/volatile-root", &device);
+        if (r == -ENOENT) { /* volatile-root not found */
+                /* Let's search for the root device. We look for two cases here: first in /, and then in /usr. The
+                * latter we check for cases where / is a tmpfs and only /usr is an actual persistent block device
+                * (think: volatile setups) */
 
-        FOREACH_STRING(p, "/", "/usr") {
+                FOREACH_STRING(p, "/", "/usr") {
 
-                r = acquire_root_devno(p, arg_root, O_RDONLY|O_DIRECTORY|O_CLOEXEC, ret, ret_fd);
-                if (r < 0) {
-                        if (r == -EUCLEAN)
-                                return btrfs_log_dev_root(LOG_ERR, r, p);
-                        if (r != -ENODEV)
-                                return log_error_errno(r, "Failed to determine backing device of %s: %m", p);
-                } else
-                        return 0;
+                        r = acquire_root_devno(p, arg_root, O_RDONLY|O_DIRECTORY|O_CLOEXEC, ret, ret_fd);
+                        if (r < 0) {
+                                if (r == -EUCLEAN)
+                                        return btrfs_log_dev_root(LOG_ERR, r, p);
+                                if (r != -ENODEV)
+                                        return log_error_errno(r, "Failed to determine backing device of %s: %m", p);
+                        } else
+                                return 0;
+                }
+        } else if (r < 0)
+                return log_error_errno(r, "Failed to read symlink /run/systemd/volatile-root: %m");
+        else {
+                r = acquire_root_devno(device, NULL, O_RDONLY|O_CLOEXEC, ret, ret_fd);
+                if (r == -EUCLEAN)
+                        return btrfs_log_dev_root(LOG_ERR, r, device);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to open file or determine backing device of %s: %m", device);
+
+                return 0;
         }
 
         return log_error_errno(SYNTHETIC_ERRNO(ENODEV), "Failed to discover root block device.");
 }
 
 static int resize_pt(int fd) {
-        char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
         _cleanup_(fdisk_unref_contextp) struct fdisk_context *c = NULL;
         int r;
 
@@ -4604,14 +4620,13 @@ static int resize_pt(int fd) {
         if (!c)
                 return log_oom();
 
-        xsprintf(procfs_path, "/proc/self/fd/%i", fd);
-        r = fdisk_assign_device(c, procfs_path, 0);
+        r = fdisk_assign_device(c, FORMAT_PROC_FD_PATH(fd), 0);
         if (r < 0)
-                return log_error_errno(r, "Failed to open device '%s': %m", procfs_path);
+                return log_error_errno(r, "Failed to open device '%s': %m", FORMAT_PROC_FD_PATH(fd));
 
         r = fdisk_has_label(c);
         if (r < 0)
-                return log_error_errno(r, "Failed to determine whether disk '%s' has a disk label: %m", procfs_path);
+                return log_error_errno(r, "Failed to determine whether disk '%s' has a disk label: %m", FORMAT_PROC_FD_PATH(fd));
         if (r == 0) {
                 log_debug("Not resizing partition table, as there currently is none.");
                 return 0;
