@@ -17,5 +17,5 @@ jobs:
       id: run
       uses: google/clusterfuzzlite/actions/run_fuzzers@v1
       with:
-        mode: 'ci'
+        mode: 'code-change'
         github-token: ${{ secrets.GITHUB_TOKEN }}
