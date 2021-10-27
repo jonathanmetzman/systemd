@@ -16,8 +16,8 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-table.h"
+#include "glyph-util.h"
 #include "json.h"
-#include "locale-util.h"
 #include "log.h"
 #include "main-func.h"
 #include "pager.h"
@@ -121,7 +121,7 @@ static int acquire_bus(bool set_monitor, sd_bus **ret) {
                         break;
 
                 default:
-                        assert_not_reached("Hmm, unknown transport type.");
+                        assert_not_reached();
                 }
         }
         if (r < 0)
@@ -339,9 +339,7 @@ static int list_bus_names(int argc, char **argv, void *userdata) {
                         if (r < 0)
                                 log_debug_errno(r, "Failed to acquire credentials of service %s, ignoring: %m", k);
                         else {
-                                char m[SD_ID128_STRING_MAX];
-
-                                r = table_add_cell(table, NULL, TABLE_STRING, sd_id128_to_string(mid, m));
+                                r = table_add_cell(table, NULL, TABLE_ID128, &mid);
                                 if (r < 0)
                                         return table_log_add_error(r);
 
@@ -466,14 +464,6 @@ static int tree_one(sd_bus *bus, const char *service) {
         if (r < 0)
                 return log_oom();
 
-        done = set_new(&string_hash_ops_free);
-        if (!done)
-                return log_oom();
-
-        failed = set_new(&string_hash_ops_free);
-        if (!failed)
-                return log_oom();
-
         for (;;) {
                 _cleanup_free_ char *p = NULL;
                 int q;
@@ -490,7 +480,7 @@ static int tree_one(sd_bus *bus, const char *service) {
                 if (q < 0 && r >= 0)
                         r = q;
 
-                q = set_consume(q < 0 ? failed : done, TAKE_PTR(p));
+                q = set_ensure_consume(q < 0 ? &failed : &done, &string_hash_ops_free, TAKE_PTR(p));
                 assert(q != 0);
                 if (q < 0)
                         return log_oom();
@@ -718,7 +708,7 @@ static int format_cmdline(sd_bus_message *m, FILE *f, bool needs_space) {
                         break;
 
                 default:
-                        assert_not_reached("Unknown basic type.");
+                        assert_not_reached();
                 }
 
                 needs_space = true;
@@ -1957,7 +1947,7 @@ static int json_transform_one(sd_bus_message *m, JsonVariant **ret) {
                 break;
 
         default:
-                assert_not_reached("Unexpected element type");
+                assert_not_reached();
         }
 
         *ret = TAKE_PTR(v);
@@ -2525,7 +2515,7 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
 
         return 1;

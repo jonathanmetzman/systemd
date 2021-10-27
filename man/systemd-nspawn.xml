@@ -527,14 +527,14 @@
       </varlistentry>
 
       <varlistentry>
-        <term><option>-E <replaceable>NAME</replaceable>=<replaceable>VALUE</replaceable></option></term>
-        <term><option>--setenv=<replaceable>NAME</replaceable>=<replaceable>VALUE</replaceable></option></term>
+        <term><option>-E <replaceable>NAME</replaceable>[=<replaceable>VALUE</replaceable>]</option></term>
+        <term><option>--setenv=<replaceable>NAME</replaceable>[=<replaceable>VALUE</replaceable>]</option></term>
 
-        <listitem><para>Specifies an environment variable assignment
-        to pass to the init process in the container, in the format
-        <literal>NAME=VALUE</literal>. This may be used to override
-        the default variables or to set additional variables. This
-        parameter may be used more than once.</para></listitem>
+        <listitem><para>Specifies an environment variable to pass to the init process in the container. This
+        may be used to override the default variables or to set additional variables. It may be used more
+        than once to set multiple variables. When <literal>=</literal> and <replaceable>VALUE</replaceable>
+        are omitted, the value of the variable with the same name in the program environment will be used.
+        </para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -569,6 +569,24 @@
         <literal>READY=1</literal> message from the init process in the container
         before sending its own to systemd. For more details about notifications
         see <citerefentry><refentrytitle>sd_notify</refentrytitle><manvolnum>3</manvolnum></citerefentry>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--suppress-sync=</option></term>
+
+        <listitem><para>Expects a boolean argument. If true, turns off any form of on-disk file system
+        synchronization for the container payload. This means all system calls such as <citerefentry
+        project='man-pages'><refentrytitle>sync</refentrytitle><manvolnum>2</manvolnum></citerefentry>,
+        <function>fsync()</function>, <function>syncfs()</function>, … will execute no operation, and the
+        <constant>O_SYNC</constant>/<constant>O_DSYNC</constant> flags to <citerefentry
+        project='man-pages'><refentrytitle>open</refentrytitle><manvolnum>2</manvolnum></citerefentry> and
+        related calls will be made unavailable. This is potentially dangerous, as assumed data integrity
+        guarantees to the container payload are not actually enforced (i.e. data assumed to have been written
+        to disk might be lost if the system is shut down abnormally). However, this can dramatically improve
+        container runtime performance – as long as these guarantees are not required or desirable, for
+        example because any data written by the container is of temporary, redundant nature, or just an
+        intermediary artifact that will be further processed and finalized by a later step in a
+        pipeline. Defaults to false.</para></listitem>
       </varlistentry>
     </variablelist>
 

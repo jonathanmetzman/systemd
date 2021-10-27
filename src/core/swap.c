@@ -932,12 +932,6 @@ static int swap_start(Unit *u) {
                 if (UNIT(other)->job && UNIT(other)->job->state == JOB_RUNNING)
                         return -EAGAIN;
 
-        r = unit_test_start_limit(u);
-        if (r < 0) {
-                swap_enter_dead(s, SWAP_FAILURE_START_LIMIT_HIT);
-                return r;
-        }
-
         r = unit_acquire_invocation_id(u);
         if (r < 0)
                 return r;
@@ -979,7 +973,7 @@ static int swap_stop(Unit *u) {
                 return 0;
 
         default:
-                assert_not_reached("Unexpected state.");
+                assert_not_reached();
         }
 }
 
@@ -1073,7 +1067,7 @@ static void swap_sigchld_event(Unit *u, pid_t pid, int code, int status) {
         else if (code == CLD_DUMPED)
                 f = SWAP_FAILURE_CORE_DUMP;
         else
-                assert_not_reached("Unknown code");
+                assert_not_reached();
 
         if (s->result == SWAP_SUCCESS)
                 s->result = f;
@@ -1118,7 +1112,7 @@ static void swap_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                 break;
 
         default:
-                assert_not_reached("Uh, control process died at wrong time.");
+                assert_not_reached();
         }
 
         /* Notify clients about changed exit status */
@@ -1169,7 +1163,7 @@ static int swap_dispatch_timer(sd_event_source *source, usec_t usec, void *userd
                 break;
 
         default:
-                assert_not_reached("Timeout at wrong time.");
+                assert_not_reached();
         }
 
         return 0;
@@ -1323,11 +1317,11 @@ static Unit *swap_following(Unit *u) {
         if (streq_ptr(s->what, s->devnode))
                 return NULL;
 
-        LIST_FOREACH_AFTER(same_devnode, other, s)
+        LIST_FOREACH(same_devnode, other, s->same_devnode_next)
                 if (streq_ptr(other->what, other->devnode))
                         return UNIT(other);
 
-        LIST_FOREACH_BEFORE(same_devnode, other, s) {
+        LIST_FOREACH_BACKWARDS(same_devnode, other, s->same_devnode_prev) {
                 if (streq_ptr(other->what, other->devnode))
                         return UNIT(other);
 
@@ -1588,6 +1582,21 @@ static int swap_can_clean(Unit *u, ExecCleanMask *ret) {
         return exec_context_get_clean_mask(&s->exec_context, ret);
 }
 
+static int swap_test_start_limit(Unit *u) {
+        Swap *s = SWAP(u);
+        int r;
+
+        assert(s);
+
+        r = unit_test_start_limit(u);
+        if (r < 0) {
+                swap_enter_dead(s, SWAP_FAILURE_START_LIMIT_HIT);
+                return r;
+        }
+
+        return 0;
+}
+
 static const char* const swap_exec_command_table[_SWAP_EXEC_COMMAND_MAX] = {
         [SWAP_EXEC_ACTIVATE]   = "ExecActivate",
         [SWAP_EXEC_DEACTIVATE] = "ExecDeactivate",
@@ -1683,4 +1692,6 @@ const UnitVTable swap_vtable = {
                         [JOB_TIMEOUT]    = "Timed out deactivating swap %s.",
                 },
         },
+
+        .test_start_limit = swap_test_start_limit,
 };

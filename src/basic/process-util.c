@@ -27,7 +27,6 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
-#include "ioprio.h"
 #include "locale-util.h"
 #include "log.h"
 #include "macro.h"
@@ -1037,6 +1036,10 @@ bool is_main_thread(void) {
         return cached > 0;
 }
 
+bool oom_score_adjust_is_valid(int oa) {
+        return oa >= OOM_SCORE_ADJ_MIN && oa <= OOM_SCORE_ADJ_MAX;
+}
+
 unsigned long personality_from_string(const char *p) {
         int architecture;
 
@@ -1250,7 +1253,7 @@ int safe_fork_full(
 
         pid_t original_pid, pid;
         sigset_t saved_ss, ss;
-        _cleanup_(restore_sigsetp) sigset_t *saved_ssp = NULL;
+        _unused_ _cleanup_(restore_sigsetp) sigset_t *saved_ssp = NULL;
         bool block_signals = false, block_all = false;
         int prio, r;
 
@@ -1499,6 +1502,24 @@ int set_oom_score_adjust(int value) {
                                  WRITE_STRING_FILE_VERIFY_ON_FAILURE|WRITE_STRING_FILE_DISABLE_BUFFER);
 }
 
+int get_oom_score_adjust(int *ret) {
+        _cleanup_free_ char *t;
+        int r, a;
+
+        r = read_virtual_file("/proc/self/oom_score_adj", SIZE_MAX, &t, NULL);
+        if (r < 0)
+                return r;
+
+        delete_trailing_chars(t, WHITESPACE);
+
+        assert_se(safe_atoi(t, &a) >= 0);
+        assert_se(oom_score_adjust_is_valid(a));
+
+        if (ret)
+                *ret = a;
+        return 0;
+}
+
 int pidfd_get_pid(int fd, pid_t *ret) {
         char path[STRLEN("/proc/self/fdinfo/") + DECIMAL_STR_MAX(int)];
         _cleanup_free_ char *fdinfo = NULL;
@@ -1595,6 +1616,25 @@ bool invoked_as(char *argv[], const char *token) {
                 return false;
 
         return strstr(last_path_component(argv[0]), token);
+}
+
+_noreturn_ void freeze(void) {
+        log_close();
+
+        /* Make sure nobody waits for us on a socket anymore */
+        (void) close_all_fds_full(NULL, 0, false);
+
+        /* Let's not freeze right away, but keep reaping zombies. */
+        for (;;) {
+                siginfo_t si = {};
+
+                if (waitid(P_ALL, 0, &si, WEXITED) < 0 && errno != EINTR)
+                        break;
+        }
+
+        /* waitid() failed with an unexpected error, things are really borked. Freeze now! */
+        for (;;)
+                pause();
 }
 
 static const char *const ioprio_class_table[] = {

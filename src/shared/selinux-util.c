@@ -266,7 +266,6 @@ int mac_selinux_fix_container_fd(int fd, const char *path, const char *inside_pa
         assert(inside_path);
 
 #if HAVE_SELINUX
-        char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
         _cleanup_freecon_ char* fcon = NULL;
         struct stat st;
         int r;
@@ -292,8 +291,7 @@ int mac_selinux_fix_container_fd(int fd, const char *path, const char *inside_pa
                 goto fail;
         }
 
-        xsprintf(procfs_path, "/proc/self/fd/%i", fd);
-        if (setfilecon_raw(procfs_path, fcon) < 0) {
+        if (setfilecon_raw(FORMAT_PROC_FD_PATH(fd), fcon) < 0) {
                 _cleanup_freecon_ char *oldcon = NULL;
 
                 /* If the FS doesn't support labels, then exit without warning */
@@ -307,7 +305,7 @@ int mac_selinux_fix_container_fd(int fd, const char *path, const char *inside_pa
                 r = -errno;
 
                 /* If the old label is identical to the new one, suppress any kind of error */
-                if (getfilecon_raw(procfs_path, &oldcon) >= 0 && streq(fcon, oldcon))
+                if (getfilecon_raw(FORMAT_PROC_FD_PATH(fd), &oldcon) >= 0 && streq(fcon, oldcon))
                         return 0;
 
                 goto fail;
@@ -564,6 +562,21 @@ int mac_selinux_create_file_prepare(const char *path, mode_t mode) {
 #endif
 }
 
+int mac_selinux_create_file_prepare_label(const char *path, const char *label) {
+#if HAVE_SELINUX
+
+        if (!label)
+                return 0;
+
+        if (!mac_selinux_use())
+                return 0;
+
+        if (setfscreatecon_raw(label) < 0)
+                return log_enforcing_errno(errno, "Failed to set specified SELinux security context '%s' for '%s': %m", label, strna(path));
+#endif
+        return 0;
+}
+
 void mac_selinux_create_file_clear(void) {
 
 #if HAVE_SELINUX
@@ -634,7 +647,8 @@ int mac_selinux_bind(int fd, const struct sockaddr *addr, socklen_t addrlen) {
         if (un->sun_path[0] == 0)
                 goto skipped;
 
-        path = strndupa(un->sun_path, addrlen - offsetof(struct sockaddr_un, sun_path));
+        path = strndupa_safe(un->sun_path,
+                             addrlen - offsetof(struct sockaddr_un, sun_path));
 
         /* Check for policy reload so 'label_hnd' is kept up-to-date by callbacks */
         mac_selinux_maybe_reload();

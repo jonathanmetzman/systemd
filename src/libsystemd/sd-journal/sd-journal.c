@@ -25,6 +25,7 @@
 #include "hashmap.h"
 #include "hostname-util.h"
 #include "id128-util.h"
+#include "inotify-util.h"
 #include "io-util.h"
 #include "journal-def.h"
 #include "journal-file.h"
@@ -190,7 +191,7 @@ static bool same_field(const void *_a, size_t s, const void *_b, size_t t) {
                         return true;
         }
 
-        assert_not_reached("\"=\" not found");
+        assert_not_reached();
 }
 
 static Match *match_new(Match *p, MatchType t) {
@@ -920,7 +921,6 @@ _public_ int sd_journal_previous_skip(sd_journal *j, uint64_t skip) {
 _public_ int sd_journal_get_cursor(sd_journal *j, char **cursor) {
         Object *o;
         int r;
-        char bid[SD_ID128_STRING_MAX], sid[SD_ID128_STRING_MAX];
 
         assert_return(j, -EINVAL);
         assert_return(!journal_pid_changed(j), -ECHILD);
@@ -933,13 +933,10 @@ _public_ int sd_journal_get_cursor(sd_journal *j, char **cursor) {
         if (r < 0)
                 return r;
 
-        sd_id128_to_string(j->current_file->header->seqnum_id, sid);
-        sd_id128_to_string(o->entry.boot_id, bid);
-
         if (asprintf(cursor,
                      "s=%s;i=%"PRIx64";b=%s;m=%"PRIx64";t=%"PRIx64";x=%"PRIx64,
-                     sid, le64toh(o->entry.seqnum),
-                     bid, le64toh(o->entry.monotonic),
+                     SD_ID128_TO_STRING(j->current_file->header->seqnum_id), le64toh(o->entry.seqnum),
+                     SD_ID128_TO_STRING(o->entry.boot_id), le64toh(o->entry.monotonic),
                      le64toh(o->entry.realtime),
                      le64toh(o->entry.xor_hash)) < 0)
                 return -ENOMEM;
@@ -1471,7 +1468,7 @@ static int dirname_is_machine_id(const char *fn) {
                 if (!log_namespace_name_valid(e + 1))
                         return false;
 
-                k = strndupa(fn, e - fn);
+                k = strndupa_safe(fn, e - fn);
                 r = sd_id128_from_string(k, &id);
         } else
                 r = sd_id128_from_string(fn, &id);
@@ -1496,7 +1493,7 @@ static int dirname_has_namespace(const char *fn, const char *namespace) {
                 if (!streq(e + 1, namespace))
                         return false;
 
-                k = strndupa(fn, e - fn);
+                k = strndupa_safe(fn, e - fn);
                 return id128_is_valid(k);
         }
 
@@ -1533,7 +1530,7 @@ static bool dirent_is_journal_subdir(const struct dirent *de) {
         if (!e)
                 return id128_is_valid(de->d_name); /* No namespace */
 
-        n = strndupa(de->d_name, e - de->d_name);
+        n = strndupa_safe(de->d_name, e - de->d_name);
         if (!id128_is_valid(n))
                 return false;
 
@@ -3158,7 +3155,11 @@ _public_ int sd_journal_enumerate_fields(sd_journal *j, const char **field) {
                         if (JOURNAL_HEADER_CONTAINS(of->header, n_fields) && le64toh(of->header->n_fields) <= 0)
                                 continue;
 
-                        r = journal_file_find_field_object_with_hash(of, o->field.payload, sz, le64toh(o->field.hash), NULL, NULL);
+                        if (!JOURNAL_HEADER_KEYED_HASH(f->header) && !JOURNAL_HEADER_KEYED_HASH(of->header))
+                                r = journal_file_find_field_object_with_hash(of, o->field.payload, sz,
+                                                                             le64toh(o->field.hash), NULL, NULL);
+                        else
+                                r = journal_file_find_field_object(of, o->field.payload, sz, NULL, NULL);
                         if (r < 0)
                                 return r;
                         if (r > 0) {
@@ -3174,7 +3175,7 @@ _public_ int sd_journal_enumerate_fields(sd_journal *j, const char **field) {
                 if (memchr(o->field.payload, 0, sz))
                         return -EBADMSG;
 
-                if (sz > j->data_threshold)
+                if (j->data_threshold > 0 && sz > j->data_threshold)
                         sz = j->data_threshold;
 
                 if (!GREEDY_REALLOC(j->fields_buffer, sz + 1))

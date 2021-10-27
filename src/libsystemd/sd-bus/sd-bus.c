@@ -249,6 +249,7 @@ _public_ int sd_bus_new(sd_bus **ret) {
                 .original_pid = getpid_cached(),
                 .n_groups = SIZE_MAX,
                 .close_on_exit = true,
+                .ucred = UCRED_INVALID,
         };
 
         /* We guarantee that wqueue always has space for at least one entry */
@@ -1406,7 +1407,7 @@ int bus_set_address_system_remote(sd_bus *b, const char *host) {
                 rbracket = strchr(host, ']');
                 if (!rbracket)
                         return -EINVAL;
-                t = strndupa(host + 1, rbracket - host - 1);
+                t = strndupa_safe(host + 1, rbracket - host - 1);
                 e = bus_address_escape(t);
                 if (!e)
                         return -ENOMEM;
@@ -1439,7 +1440,7 @@ int bus_set_address_system_remote(sd_bus *b, const char *host) {
 
                 t = strchr(p, '/');
                 if (t) {
-                        p = strndupa(p, t - p);
+                        p = strndupa_safe(p, t - p);
                         got_forward_slash = true;
                 }
 
@@ -1466,7 +1467,7 @@ interpret_port_as_machine_old_syntax:
         if (!e) {
                 char *t;
 
-                t = strndupa(host, strcspn(host, ":/"));
+                t = strndupa_safe(host, strcspn(host, ":/"));
 
                 e = bus_address_escape(t);
                 if (!e)
@@ -2545,7 +2546,7 @@ _public_ int sd_bus_get_events(sd_bus *bus) {
                 break;
 
         default:
-                assert_not_reached("Unknown state");
+                assert_not_reached();
         }
 
         return flags;
@@ -2604,7 +2605,7 @@ _public_ int sd_bus_get_timeout(sd_bus *bus, uint64_t *timeout_usec) {
                 return 0;
 
         default:
-                assert_not_reached("Unknown or unexpected stat");
+                assert_not_reached();
         }
 }
 
@@ -2873,7 +2874,6 @@ static int process_builtin(sd_bus *bus, sd_bus_message *m) {
                 r = sd_bus_message_new_method_return(m, &reply);
         else if (streq_ptr(m->member, "GetMachineId")) {
                 sd_id128_t id;
-                char sid[SD_ID128_STRING_MAX];
 
                 r = sd_id128_get_machine(&id);
                 if (r < 0)
@@ -2883,7 +2883,7 @@ static int process_builtin(sd_bus *bus, sd_bus_message *m) {
                 if (r < 0)
                         return r;
 
-                r = sd_bus_message_append(reply, "s", sd_id128_to_string(id, sid));
+                r = sd_bus_message_append(reply, "s", SD_ID128_TO_STRING(id));
         } else {
                 r = sd_bus_message_new_method_errorf(
                                 m, &reply,
@@ -3063,7 +3063,7 @@ static int bus_exit_now(sd_bus *bus) {
         else
                 exit(EXIT_FAILURE);
 
-        assert_not_reached("exit() didn't exit?");
+        assert_not_reached();
 }
 
 static int process_closing_reply_callback(sd_bus *bus, struct reply_callback *c) {
@@ -3234,7 +3234,7 @@ static int bus_process_internal(sd_bus *bus, sd_bus_message **ret) {
                 return process_closing(bus, ret);
 
         default:
-                assert_not_reached("Unknown state");
+                assert_not_reached();
         }
 
         if (ERRNO_IS_DISCONNECT(r)) {

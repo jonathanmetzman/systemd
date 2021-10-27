@@ -90,7 +90,7 @@ int dns_server_new(
                 break;
 
         default:
-                assert_not_reached("Unknown server type");
+                assert_not_reached();
         }
 
         s->linked = true;
@@ -158,7 +158,7 @@ void dns_server_unlink(DnsServer *s) {
                 s->manager->n_dns_servers--;
                 break;
         default:
-                assert_not_reached("Unknown server type");
+                assert_not_reached();
         }
 
         s->linked = false;
@@ -213,7 +213,7 @@ void dns_server_move_back_and_unmark(DnsServer *s) {
                 break;
 
         default:
-                assert_not_reached("Unknown server type");
+                assert_not_reached();
         }
 }
 
@@ -362,9 +362,8 @@ void dns_server_packet_rcode_downgrade(DnsServer *s, DnsServerFeatureLevel level
         if (s->possible_feature_level > level) {
                 s->possible_feature_level = level;
                 dns_server_reset_counters(s);
+                log_debug("Downgrading transaction feature level fixed an RCODE error, downgrading server %s too.", strna(dns_server_string_full(s)));
         }
-
-        log_debug("Downgrading transaction feature level fixed an RCODE error, downgrading server %s too.", strna(dns_server_string_full(s)));
 }
 
 void dns_server_packet_invalid(DnsServer *s, DnsServerFeatureLevel level) {

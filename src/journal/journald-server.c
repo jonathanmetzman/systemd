@@ -408,6 +408,13 @@ static JournalFile* find_journal(Server *s, uid_t uid) {
         if (s->runtime_journal)
                 return s->runtime_journal;
 
+        /* If we are not in persistent mode, then we need return NULL immediately rather than opening a
+         * persistent journal of any sort.
+         *
+         * Fixes https://github.com/systemd/systemd/issues/20390 */
+        if (!IN_SET(s->storage, STORAGE_AUTO, STORAGE_PERSISTENT))
+                return NULL;
+
         if (uid_for_system_journal(uid))
                 return s->system_journal;
 
@@ -804,7 +811,7 @@ static void write_to_journal(Server *s, uid_t uid, struct iovec *iovec, size_t n
                  * to ensure that the entries in the journal files are strictly ordered by time, in order to ensure
                  * bisection works correctly. */
 
-                log_debug("Time jumped backwards, rotating.");
+                log_info("Time jumped backwards, rotating.");
                 rotate = true;
         } else {
 
@@ -812,8 +819,8 @@ static void write_to_journal(Server *s, uid_t uid, struct iovec *iovec, size_t n
                 if (!f)
                         return;
 
-                if (journal_file_rotate_suggested(f, s->max_file_usec)) {
-                        log_debug("%s: Journal header limits reached or header out-of-date, rotating.", f->path);
+                if (journal_file_rotate_suggested(f, s->max_file_usec, LOG_INFO)) {
+                        log_info("%s: Journal header limits reached or header out-of-date, rotating.", f->path);
                         rotate = true;
                 }
         }
@@ -840,6 +847,8 @@ static void write_to_journal(Server *s, uid_t uid, struct iovec *iovec, size_t n
                 log_error_errno(r, "Failed to write entry (%zu items, %zu bytes), ignoring: %m", n, IOVEC_TOTAL_SIZE(iovec, n));
                 return;
         }
+
+        log_info_errno(r, "Failed to write entry (%zu items, %zu bytes), rotating before retrying: %m", n, IOVEC_TOTAL_SIZE(iovec, n));
 
         server_rotate(s);
         server_vacuum(s, false);
@@ -896,7 +905,7 @@ static void dispatch_message_real(
                 pid_t object_pid) {
 
         char source_time[sizeof("_SOURCE_REALTIME_TIMESTAMP=") + DECIMAL_STR_MAX(usec_t)];
-        _cleanup_free_ char *cmdline1 = NULL, *cmdline2 = NULL;
+        _unused_ _cleanup_free_ char *cmdline1 = NULL, *cmdline2 = NULL;
         uid_t journal_uid;
         ClientContext *o;
 
@@ -1165,6 +1174,8 @@ int server_flush_to_var(Server *s, bool require_flag_file) {
                         goto finish;
                 }
 
+                log_info("Rotating system journal.");
+
                 server_rotate(s);
                 server_vacuum(s, false);
 
@@ -1260,11 +1271,14 @@ int server_process_datagram(
         /* We use NAME_MAX space for the SELinux label here. The kernel currently enforces no limit, but
          * according to suggestions from the SELinux people this will change and it will probably be
          * identical to NAME_MAX. For now we use that, but this should be updated one day when the final
-         * limit is known. */
+         * limit is known.
+         *
+         * Here, we need to explicitly initialize the buffer with zero, as glibc has a bug in
+         * __convert_scm_timestamps(), which assumes the buffer is initialized. See #20741. */
         CMSG_BUFFER_TYPE(CMSG_SPACE(sizeof(struct ucred)) +
-                         CMSG_SPACE(sizeof(struct timeval)) +
+                         CMSG_SPACE_TIMEVAL +
                          CMSG_SPACE(sizeof(int)) + /* fd */
-                         CMSG_SPACE(NAME_MAX) /* selinux label */) control;
+                         CMSG_SPACE(NAME_MAX) /* selinux label */) control = {};
 
         union sockaddr_union sa = {};
 
@@ -1418,7 +1432,7 @@ static int dispatch_sigusr2(sd_event_source *es, const struct signalfd_siginfo *
 
         assert(s);
 
-        log_info("Received SIGUSR2 signal from PID " PID_FMT ", as request to rotate journal.", si->ssi_pid);
+        log_info("Received SIGUSR2 signal from PID " PID_FMT ", as request to rotate journal, rotating.", si->ssi_pid);
         server_full_rotate(s);
 
         return 0;
@@ -1960,7 +1974,7 @@ static int vl_method_rotate(Varlink *link, JsonVariant *parameters, VarlinkMetho
         if (json_variant_elements(parameters) > 0)
                 return varlink_error_invalid_parameter(link, parameters);
 
-        log_info("Received client request to rotate journal.");
+        log_info("Received client request to rotate journal, rotating.");
         server_full_rotate(s);
 
         return varlink_reply(link, NULL);

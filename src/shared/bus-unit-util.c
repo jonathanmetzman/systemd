@@ -474,7 +474,9 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                 return bus_append_cg_cpu_shares_parse(m, field, eq);
 
         if (STR_IN_SET(field, "AllowedCPUs",
-                              "AllowedMemoryNodes")) {
+                              "StartupAllowedCPUs",
+                              "AllowedMemoryNodes",
+                              "StartupAllowedMemoryNodes")) {
                 _cleanup_(cpu_set_reset) CPUSet cpuset = {};
                 _cleanup_free_ uint8_t *array = NULL;
                 size_t allocated;
@@ -603,7 +605,7 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
 
                         e = strchr(eq, ' ');
                         if (e) {
-                                path = strndupa(eq, e - eq);
+                                path = strndupa_safe(eq, e - eq);
                                 rwm = e+1;
                         }
 
@@ -629,7 +631,7 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                                                        "Failed to parse %s value %s.",
                                                        field, eq);
 
-                        path = strndupa(eq, e - eq);
+                        path = strndupa_safe(eq, e - eq);
                         bandwidth = e+1;
 
                         if (streq(bandwidth, "infinity"))
@@ -663,7 +665,7 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                                                        "Failed to parse %s value %s.",
                                                        field, eq);
 
-                        path = strndupa(eq, e - eq);
+                        path = strndupa_safe(eq, e - eq);
                         weight = e+1;
 
                         r = safe_atou64(weight, &u);
@@ -694,7 +696,7 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                                                        "Failed to parse %s value %s.",
                                                        field, eq);
 
-                        path = strndupa(eq, e - eq);
+                        path = strndupa_safe(eq, e - eq);
                         target = e+1;
 
                         r = parse_sec(target, &usec);
@@ -967,6 +969,7 @@ static int bus_append_execute_property(sd_bus_message *m, const char *field, con
                               "InaccessiblePaths",
                               "ExecPaths",
                               "NoExecPaths",
+                              "ExecSearchPath",
                               "RuntimeDirectory",
                               "StateDirectory",
                               "CacheDirectory",
@@ -1383,8 +1386,10 @@ static int bus_append_execute_property(sd_bus_message *m, const char *field, con
         }
 
         if (STR_IN_SET(field, "RestrictAddressFamilies",
+                              "RestrictFileSystems",
                               "SystemCallFilter",
-                              "SystemCallLog")) {
+                              "SystemCallLog",
+                              "RestrictNetworkInterfaces")) {
                 int allow_list = 1;
                 const char *p = eq;
 
@@ -1995,6 +2000,9 @@ static int bus_append_scope_property(sd_bus_message *m, const char *field, const
         if (streq(field, "RuntimeMaxSec"))
                 return bus_append_parse_sec_rename(m, field, eq);
 
+        if (streq(field, "RuntimeRandomizedExtraSec"))
+                return bus_append_parse_sec_rename(m, field, eq);
+
         if (streq(field, "TimeoutStopSec"))
                 return bus_append_parse_sec_rename(m, field, eq);
 
@@ -2027,6 +2035,7 @@ static int bus_append_service_property(sd_bus_message *m, const char *field, con
                               "TimeoutStopSec",
                               "TimeoutAbortSec",
                               "RuntimeMaxSec",
+                              "RuntimeRandomizedExtraSec",
                               "WatchdogSec"))
                 return bus_append_parse_sec_rename(m, field, eq);
 
@@ -2393,7 +2402,7 @@ int bus_append_unit_property_assignment(sd_bus_message *m, UnitType t, const cha
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Not an assignment: %s", assignment);
 
-        field = strndupa(assignment, eq - assignment);
+        field = strndupa_safe(assignment, eq - assignment);
         eq++;
 
         switch (t) {

@@ -159,12 +159,13 @@ static int detect_vm_dmi_vendor(void) {
                 { "VMware",              VIRTUALIZATION_VMWARE    }, /* https://kb.vmware.com/s/article/1009458 */
                 { "VMW",                 VIRTUALIZATION_VMWARE    },
                 { "innotek GmbH",        VIRTUALIZATION_ORACLE    },
-                { "Oracle Corporation",  VIRTUALIZATION_ORACLE    },
+                { "VirtualBox",          VIRTUALIZATION_ORACLE    },
                 { "Xen",                 VIRTUALIZATION_XEN       },
                 { "Bochs",               VIRTUALIZATION_BOCHS     },
                 { "Parallels",           VIRTUALIZATION_PARALLELS },
                 /* https://wiki.freebsd.org/bhyve */
                 { "BHYVE",               VIRTUALIZATION_BHYVE     },
+                { "Microsoft",           VIRTUALIZATION_MICROSOFT },
         };
         int r;
 
@@ -235,8 +236,36 @@ static int detect_vm_dmi(void) {
 
         /* The DMI vendor tables in /sys/class/dmi/id don't help us distinguish between Amazon EC2
          * virtual machines and bare-metal instances, so we need to look at SMBIOS. */
-        if (r == VIRTUALIZATION_AMAZON && detect_vm_smbios() == SMBIOS_VM_BIT_UNSET)
-                return VIRTUALIZATION_NONE;
+        if (r == VIRTUALIZATION_AMAZON) {
+                switch (detect_vm_smbios()) {
+                case SMBIOS_VM_BIT_SET:
+                        return VIRTUALIZATION_AMAZON;
+                case SMBIOS_VM_BIT_UNSET:
+                        return VIRTUALIZATION_NONE;
+                case SMBIOS_VM_BIT_UNKNOWN: {
+                        /* The DMI information we are after is only accessible to the root user,
+                         * so we fallback to using the product name which is less restricted
+                         * to distinguish metal systems from virtualized instances */
+                        _cleanup_free_ char *s = NULL;
+
+                        r = read_full_virtual_file("/sys/class/dmi/id/product_name", &s, NULL);
+                        /* In EC2, virtualized is much more common than metal, so if for some reason
+                         * we fail to read the DMI data, assume we are virtualized. */
+                        if (r < 0) {
+                                log_debug_errno(r, "Can't read /sys/class/dmi/id/product_name,"
+                                                " assuming virtualized: %m");
+                                return VIRTUALIZATION_AMAZON;
+                        }
+                        if (endswith(truncate_nl(s), ".metal")) {
+                                log_debug("DMI product name ends with '.metal', assuming no virtualization");
+                                return VIRTUALIZATION_NONE;
+                        } else
+                                return VIRTUALIZATION_AMAZON;
+                }
+                default:
+                        assert_not_reached();
+              }
+        }
 
         /* If we haven't identified a VM, but the firmware indicates that there is one, indicate as much. We
          * have no further information about what it is. */
@@ -246,19 +275,6 @@ static int detect_vm_dmi(void) {
 #else
         return VIRTUALIZATION_NONE;
 #endif
-}
-
-static int detect_vm_xen(void) {
-
-        /* Check for Dom0 will be executed later in detect_vm_xen_dom0
-           The presence of /proc/xen indicates some form of a Xen domain */
-        if (access("/proc/xen", F_OK) < 0) {
-                log_debug("Virtualization XEN not found, /proc/xen does not exist");
-                return VIRTUALIZATION_NONE;
-        }
-
-        log_debug("Virtualization XEN found (/proc/xen exists)");
-        return VIRTUALIZATION_XEN;
 }
 
 #define XENFEAT_dom0 11 /* xen/include/public/features.h */
@@ -312,6 +328,26 @@ static int detect_vm_xen_dom0(void) {
                         return 1;
                 }
         }
+}
+
+static int detect_vm_xen(void) {
+        int r;
+
+        /* The presence of /proc/xen indicates some form of a Xen domain */
+        if (access("/proc/xen", F_OK) < 0) {
+                log_debug("Virtualization XEN not found, /proc/xen does not exist");
+                return VIRTUALIZATION_NONE;
+        }
+        log_debug("Virtualization XEN found (/proc/xen exists)");
+
+        /* Ignore the Xen hypervisor if we are in Dom0 */
+        r = detect_vm_xen_dom0();
+        if (r < 0)
+                return r;
+        if (r > 0)
+                return VIRTUALIZATION_NONE;
+
+        return VIRTUALIZATION_XEN;
 }
 
 static int detect_vm_hypervisor(void) {
@@ -407,7 +443,8 @@ int detect_vm(void) {
          *
          * → First, try to detect Oracle Virtualbox and Amazon EC2 Nitro, even if they use KVM, as well as Xen even if
          *   it cloaks as Microsoft Hyper-V. Attempt to detect uml at this stage also since it runs as a user-process
-         *   nested inside other VMs.
+         *   nested inside other VMs. Also check for Xen now, because Xen PV mode does not override CPUID when nested
+         *   inside another hypervisor.
          *
          * → Second, try to detect from CPUID, this will report KVM for whatever software is used even if info in DMI is
          *   overwritten.
@@ -422,6 +459,15 @@ int detect_vm(void) {
 
         /* Detect UML */
         r = detect_vm_uml();
+        if (r < 0)
+                return r;
+        if (r == VIRTUALIZATION_VM_OTHER)
+                other = true;
+        else if (r != VIRTUALIZATION_NONE)
+                goto finish;
+
+        /* Detect Xen */
+        r = detect_vm_xen();
         if (r < 0)
                 return r;
         if (r == VIRTUALIZATION_VM_OTHER)
@@ -448,20 +494,7 @@ int detect_vm(void) {
                 goto finish;
         }
 
-        /* x86 xen will most likely be detected by cpuid. If not (most likely
-         * because we're not an x86 guest), then we should try the /proc/xen
-         * directory next. If that's not found, then we check for the high-level
-         * hypervisor sysfs file.
-         */
-
-        r = detect_vm_xen();
-        if (r < 0)
-                return r;
-        if (r == VIRTUALIZATION_VM_OTHER)
-                other = true;
-        else if (r != VIRTUALIZATION_NONE)
-                goto finish;
-
+        /* Check high-level hypervisor sysfs file */
         r = detect_vm_hypervisor();
         if (r < 0)
                 return r;
@@ -483,18 +516,7 @@ int detect_vm(void) {
                 return r;
 
 finish:
-        /* x86 xen Dom0 is detected as XEN in hypervisor and maybe others.
-         * In order to detect the Dom0 as not virtualization we need to
-         * double-check it */
-        if (r == VIRTUALIZATION_XEN) {
-                int dom0;
-
-                dom0 = detect_vm_xen_dom0();
-                if (dom0 < 0)
-                        return dom0;
-                if (dom0 > 0)
-                        r = VIRTUALIZATION_NONE;
-        } else if (r == VIRTUALIZATION_NONE && other)
+        if (r == VIRTUALIZATION_NONE && other)
                 r = VIRTUALIZATION_VM_OTHER;
 
         cached_found = r;

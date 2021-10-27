@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <linux/oom.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
 
@@ -25,8 +24,8 @@
 #include "fileio.h"
 #include "hexdecoct.h"
 #include "io-util.h"
-#include "ioprio.h"
 #include "journal-file.h"
+#include "missing_ioprio.h"
 #include "mountpoint-util.h"
 #include "namespace.h"
 #include "parse-util.h"
@@ -38,6 +37,7 @@
 #endif
 #include "securebits-util.h"
 #include "specifier.h"
+#include "stat-util.h"
 #include "strv.h"
 #include "syslog-util.h"
 #include "unit-printf.h"
@@ -56,8 +56,8 @@ static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_protect_system, protect_system,
 static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_personality, personality, unsigned long);
 static BUS_DEFINE_PROPERTY_GET(property_get_ioprio, "i", ExecContext, exec_context_get_effective_ioprio);
 static BUS_DEFINE_PROPERTY_GET(property_get_mount_apivfs, "b", ExecContext, exec_context_get_effective_mount_apivfs);
-static BUS_DEFINE_PROPERTY_GET2(property_get_ioprio_class, "i", ExecContext, exec_context_get_effective_ioprio, IOPRIO_PRIO_CLASS);
-static BUS_DEFINE_PROPERTY_GET2(property_get_ioprio_priority, "i", ExecContext, exec_context_get_effective_ioprio, IOPRIO_PRIO_DATA);
+static BUS_DEFINE_PROPERTY_GET2(property_get_ioprio_class, "i", ExecContext, exec_context_get_effective_ioprio, ioprio_prio_class);
+static BUS_DEFINE_PROPERTY_GET2(property_get_ioprio_priority, "i", ExecContext, exec_context_get_effective_ioprio, ioprio_prio_data);
 static BUS_DEFINE_PROPERTY_GET_GLOBAL(property_get_empty_string, "s", NULL);
 static BUS_DEFINE_PROPERTY_GET_REF(property_get_syslog_level, "i", int, LOG_PRI);
 static BUS_DEFINE_PROPERTY_GET_REF(property_get_syslog_facility, "i", int, LOG_FAC);
@@ -95,10 +95,6 @@ static int property_get_environment_files(
         return sd_bus_message_close_container(reply);
 }
 
-static bool oom_score_adjust_is_valid(int oa) {
-        return oa >= OOM_SCORE_ADJ_MIN && oa <= OOM_SCORE_ADJ_MAX;
-}
-
 static int property_get_oom_score_adjust(
                 sd_bus *bus,
                 const char *path,
@@ -109,8 +105,7 @@ static int property_get_oom_score_adjust(
                 sd_bus_error *error) {
 
         ExecContext *c = userdata;
-        int32_t n;
-        int r;
+        int r, n;
 
         assert(bus);
         assert(reply);
@@ -119,17 +114,10 @@ static int property_get_oom_score_adjust(
         if (c->oom_score_adjust_set)
                 n = c->oom_score_adjust;
         else {
-                _cleanup_free_ char *t = NULL;
-
                 n = 0;
-                r = read_one_line_file("/proc/self/oom_score_adj", &t);
+                r = get_oom_score_adjust(&n);
                 if (r < 0)
                         log_debug_errno(r, "Failed to read /proc/self/oom_score_adj, ignoring: %m");
-                else {
-                        r = safe_atoi32(t, &n);
-                        if (r < 0)
-                                log_debug_errno(r, "Failed to parse \"%s\" from /proc/self/oom_score_adj, ignoring: %m", t);
-                }
         }
 
         return sd_bus_message_append(reply, "i", n);
@@ -694,6 +682,46 @@ static int property_get_input_data(
         return sd_bus_message_append_array(reply, 'y', c->stdin_data, c->stdin_data_size);
 }
 
+static int property_get_restrict_filesystems(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *error) {
+
+        ExecContext *c = userdata;
+        _cleanup_free_ char **l = NULL;
+        int r;
+
+        assert(bus);
+        assert(reply);
+        assert(c);
+
+        r = sd_bus_message_open_container(reply, 'r', "bas");
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_append(reply, "b", c->restrict_filesystems_allow_list);
+        if (r < 0)
+                return r;
+
+#if HAVE_LIBBPF
+        l = set_get_strv(c->restrict_filesystems);
+        if (!l)
+                return -ENOMEM;
+#endif
+
+        strv_sort(l);
+
+        r = sd_bus_message_append_strv(reply, l);
+        if (r < 0)
+                return r;
+
+        return sd_bus_message_close_container(reply);
+}
+
 static int property_get_bind_paths(
                 sd_bus *bus,
                 const char *path,
@@ -1166,6 +1194,7 @@ const sd_bus_vtable bus_exec_vtable[] = {
         SD_BUS_PROPERTY("InaccessiblePaths", "as", NULL, offsetof(ExecContext, inaccessible_paths), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("ExecPaths", "as", NULL, offsetof(ExecContext, exec_paths), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("NoExecPaths", "as", NULL, offsetof(ExecContext, no_exec_paths), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("ExecSearchPath", "as", NULL, offsetof(ExecContext, exec_search_path), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("MountFlags", "t", bus_property_get_ulong, offsetof(ExecContext, mount_flags), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("PrivateTmp", "b", bus_property_get_bool, offsetof(ExecContext, private_tmp), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("PrivateDevices", "b", bus_property_get_bool, offsetof(ExecContext, private_devices), SD_BUS_VTABLE_PROPERTY_CONST),
@@ -1211,6 +1240,7 @@ const sd_bus_vtable bus_exec_vtable[] = {
         SD_BUS_PROPERTY("RestrictRealtime", "b", bus_property_get_bool, offsetof(ExecContext, restrict_realtime), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("RestrictSUIDSGID", "b", bus_property_get_bool, offsetof(ExecContext, restrict_suid_sgid), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("RestrictNamespaces", "t", bus_property_get_ulong, offsetof(ExecContext, restrict_namespaces), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("RestrictFileSystems", "(bas)", property_get_restrict_filesystems, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("BindPaths", "a(ssbt)", property_get_bind_paths, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("BindReadOnlyPaths", "a(ssbt)", property_get_bind_paths, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("TemporaryFileSystem", "a(ss)", property_get_temporary_filesystems, 0, SD_BUS_VTABLE_PROPERTY_CONST),
@@ -1434,6 +1464,10 @@ int bus_set_transient_exec_command(
                 r = sd_bus_message_read_strv(message, &argv);
                 if (r < 0)
                         return r;
+
+                if (strv_isempty(argv))
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS,
+                                                 "\"%s\" argv cannot be empty", name);
 
                 r = is_ex_prop ? sd_bus_message_read_strv(message, &ex_opts) : sd_bus_message_read(message, "b", &b);
                 if (r < 0)
@@ -1886,6 +1920,64 @@ int bus_exec_context_set_transient_property(
 
         if (streq(name, "RestrictNamespaces"))
                 return bus_set_transient_namespace_flag(u, name, &c->restrict_namespaces, message, flags, error);
+
+        if (streq(name, "RestrictFileSystems")) {
+                int allow_list;
+                _cleanup_strv_free_ char **l = NULL;
+
+                r = sd_bus_message_enter_container(message, 'r', "bas");
+                if (r < 0)
+                        return r;
+
+                r = sd_bus_message_read(message, "b", &allow_list);
+                if (r < 0)
+                        return r;
+
+                r = sd_bus_message_read_strv(message, &l);
+                if (r < 0)
+                        return r;
+
+                r = sd_bus_message_exit_container(message);
+                if (r < 0)
+                        return r;
+
+                if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        _cleanup_free_ char *joined = NULL;
+                        FilesystemParseFlags invert_flag = allow_list ? 0 : FILESYSTEM_PARSE_INVERT;
+                        char **s;
+
+                        if (strv_isempty(l)) {
+                                c->restrict_filesystems_allow_list = false;
+                                c->restrict_filesystems = set_free(c->restrict_filesystems);
+
+                                unit_write_setting(u, flags, name, "RestrictFileSystems=");
+                                return 1;
+                        }
+
+                        if (!c->restrict_filesystems)
+                                c->restrict_filesystems_allow_list = allow_list;
+
+                        STRV_FOREACH(s, l) {
+                                r = lsm_bpf_parse_filesystem(
+                                              *s,
+                                              &c->restrict_filesystems,
+                                              FILESYSTEM_PARSE_LOG|
+                                              (invert_flag ? FILESYSTEM_PARSE_INVERT : 0)|
+                                              (c->restrict_filesystems_allow_list ? FILESYSTEM_PARSE_ALLOW_LIST : 0),
+                                              u->id, NULL, 0);
+                                if (r < 0)
+                                        return r;
+                        }
+
+                        joined = strv_join(l, " ");
+                        if (!joined)
+                                return -ENOMEM;
+
+                        unit_write_settingf(u, flags, name, "%s=%s%s", name, allow_list ? "" : "~", joined);
+                }
+
+                return 1;
+        }
 
         if (streq(name, "MountFlags"))
                 return bus_set_transient_mount_flags(u, name, &c->mount_flags, message, flags, error);
@@ -2642,7 +2734,7 @@ int bus_exec_context_set_transient_property(
                         if (r < 0)
                                 return r;
 
-                        c->ioprio = IOPRIO_PRIO_VALUE(q, IOPRIO_PRIO_DATA(c->ioprio));
+                        c->ioprio = ioprio_prio_value(q, ioprio_prio_data(c->ioprio));
                         c->ioprio_set = true;
 
                         unit_write_settingf(u, flags, name, "IOSchedulingClass=%s", s);
@@ -2661,7 +2753,7 @@ int bus_exec_context_set_transient_property(
                         return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid IO scheduling priority: %i", p);
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
-                        c->ioprio = IOPRIO_PRIO_VALUE(IOPRIO_PRIO_CLASS(c->ioprio), p);
+                        c->ioprio = ioprio_prio_value(ioprio_prio_class(c->ioprio), p);
                         c->ioprio_set = true;
 
                         unit_write_settingf(u, flags, name, "IOSchedulingPriority=%i", p);
@@ -2893,7 +2985,7 @@ int bus_exec_context_set_transient_property(
                                 if (!joined)
                                         return -ENOMEM;
 
-                                e = strv_env_merge(2, c->environment, l);
+                                e = strv_env_merge(c->environment, l);
                                 if (!e)
                                         return -ENOMEM;
 
@@ -2927,7 +3019,7 @@ int bus_exec_context_set_transient_property(
                                 if (!joined)
                                         return -ENOMEM;
 
-                                e = strv_env_merge(2, c->unset_environment, l);
+                                e = strv_env_merge(c->unset_environment, l);
                                 if (!e)
                                         return -ENOMEM;
 
@@ -3145,6 +3237,36 @@ int bus_exec_context_set_transient_property(
 
                 return 1;
 
+        } else if (streq(name, "ExecSearchPath")) {
+                _cleanup_strv_free_ char **l = NULL;
+                char **p;
+
+                r = sd_bus_message_read_strv(message, &l);
+                if (r < 0)
+                        return r;
+
+                STRV_FOREACH(p, l) {
+                        if (!path_is_absolute(*p) || !path_is_normalized(*p) || strchr(*p, ':'))
+                                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid %s", name);
+                }
+                if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        if (strv_isempty(l)) {
+                                c->exec_search_path = strv_free(c->exec_search_path);
+                                unit_write_settingf(u, flags|UNIT_ESCAPE_SPECIFIERS, name, "ExecSearchPath=");
+                        } else {
+                                _cleanup_free_ char *joined = NULL;
+                                r = strv_extend_strv(&c->exec_search_path, l, true);
+                                if (r < 0)
+                                        return -ENOMEM;
+                                joined = strv_join(c->exec_search_path, ":");
+                                if (!joined)
+                                        return log_oom();
+                                unit_write_settingf(u, flags|UNIT_ESCAPE_SPECIFIERS, name, "ExecSearchPath=%s", joined);
+                        }
+                }
+
+                return 1;
+
         } else if (STR_IN_SET(name, "RuntimeDirectory", "StateDirectory", "CacheDirectory", "LogsDirectory", "ConfigurationDirectory")) {
                 _cleanup_strv_free_ char **l = NULL;
                 char **p;
@@ -3340,7 +3462,7 @@ int bus_exec_context_set_transient_property(
                         if (soft) {
                                 const char *n;
 
-                                n = strndupa(suffix, soft - suffix);
+                                n = strndupa_safe(suffix, soft - suffix);
                                 ri = rlimit_from_string(n);
                                 if (ri >= 0)
                                         name = strjoina("Limit", n);

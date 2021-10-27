@@ -1091,7 +1091,7 @@ void dns_transaction_process_reply(DnsTransaction *t, DnsPacket *p, bool encrypt
                 break;
 
         default:
-                assert_not_reached("Invalid DNS protocol.");
+                assert_not_reached();
         }
 
         if (t->received != p) {
@@ -1142,22 +1142,35 @@ void dns_transaction_process_reply(DnsTransaction *t, DnsPacket *p, bool encrypt
                                 break;
                         }
 
-                        /* Reduce this feature level by one and try again. */
-                        switch (t->current_feature_level) {
-                        case DNS_SERVER_FEATURE_LEVEL_TLS_DO:
-                                t->clamp_feature_level_servfail = DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN;
-                                break;
-                        case DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN + 1:
-                                /* Skip plain TLS when TLS is not supported */
-                                t->clamp_feature_level_servfail = DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN - 1;
-                                break;
-                        default:
-                                t->clamp_feature_level_servfail = t->current_feature_level - 1;
-                        }
+                        /* SERVFAIL can happen for many reasons and may be transient.
+                         * To avoid unnecessary downgrades retry once with the initial level.
+                         * Check for clamp_feature_level_servfail having an invalid value as a sign that this is the
+                         * first attempt to downgrade. If so, clamp to the current value so that the transaction
+                         * is retried without actually downgrading. If the next try also fails we will downgrade by
+                         * hitting the else branch below. */
+                        if (DNS_PACKET_RCODE(p) == DNS_RCODE_SERVFAIL &&
+                            t->clamp_feature_level_servfail < 0) {
+                                t->clamp_feature_level_servfail = t->current_feature_level;
+                                log_debug("Server returned error %s, retrying transaction.",
+                                          dns_rcode_to_string(DNS_PACKET_RCODE(p)));
+                        } else {
+                                /* Reduce this feature level by one and try again. */
+                                switch (t->current_feature_level) {
+                                case DNS_SERVER_FEATURE_LEVEL_TLS_DO:
+                                        t->clamp_feature_level_servfail = DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN;
+                                        break;
+                                case DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN + 1:
+                                        /* Skip plain TLS when TLS is not supported */
+                                        t->clamp_feature_level_servfail = DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN - 1;
+                                        break;
+                                default:
+                                        t->clamp_feature_level_servfail = t->current_feature_level - 1;
+                                }
 
-                        log_debug("Server returned error %s, retrying transaction with reduced feature level %s.",
-                                  dns_rcode_to_string(DNS_PACKET_RCODE(p)),
-                                  dns_server_feature_level_to_string(t->clamp_feature_level_servfail));
+                                log_debug("Server returned error %s, retrying transaction with reduced feature level %s.",
+                                          dns_rcode_to_string(DNS_PACKET_RCODE(p)),
+                                          dns_server_feature_level_to_string(t->clamp_feature_level_servfail));
+                        }
 
                         dns_transaction_retry(t, false /* use the same server */);
                         return;
@@ -1184,7 +1197,7 @@ void dns_transaction_process_reply(DnsTransaction *t, DnsPacket *p, bool encrypt
                 break;
 
         default:
-                assert_not_reached("Invalid DNS protocol.");
+                assert_not_reached();
         }
 
         if (DNS_PACKET_TC(p)) {
@@ -1528,7 +1541,7 @@ static int on_transaction_timeout(sd_event_source *s, usec_t usec, void *userdat
                         break;
 
                 default:
-                        assert_not_reached("Invalid DNS protocol.");
+                        assert_not_reached();
                 }
 
                 log_debug("Timeout reached on transaction %" PRIu16 ".", t->id);
@@ -1567,7 +1580,7 @@ static usec_t transaction_get_resend_timeout(DnsTransaction *t) {
                 return t->scope->resend_timeout;
 
         default:
-                assert_not_reached("Invalid DNS protocol.");
+                assert_not_reached();
         }
 }
 
@@ -1959,7 +1972,7 @@ int dns_transaction_go(DnsTransaction *t) {
                         accuracy = MDNS_JITTER_RANGE_USEC;
                         break;
                 default:
-                        assert_not_reached("bad protocol");
+                        assert_not_reached();
                 }
 
                 assert(!t->timeout_event_source);
@@ -3530,7 +3543,7 @@ int dns_transaction_validate_dnssec(DnsTransaction *t) {
                         break;
 
                 default:
-                        assert_not_reached("Unexpected NSEC result.");
+                        assert_not_reached();
                 }
         }
 
