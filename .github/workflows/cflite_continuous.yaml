@@ -26,7 +26,7 @@ jobs:
       uses: google/clusterfuzzlite/actions/run_fuzzers@v1
       with:
         fuzz-seconds: 600
-        run-fuzzers-mode: 'coverage'
+        mode: 'coverage'
         storage-repo: https://${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/jonathanmetzman/systemd-clusterfuzzlite-storage.git
         storage-repo-branch: main   # Optional. Defaults to "main"
         storage-repo-branch-coverage: gh-pages  # Optional. Defaults to "gh-pages".
