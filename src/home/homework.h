@@ -7,6 +7,7 @@
 #include "sd-id128.h"
 
 #include "loop-util.h"
+#include "strv.h"
 #include "user-record.h"
 #include "user-record-util.h"
 
@@ -27,23 +28,32 @@ typedef struct HomeSetup {
         void *volume_key;
         size_t volume_key_size;
 
-        bool undo_dm;
-        bool undo_mount;
-        bool do_offline_fitrim;
-        bool do_offline_fallocate;
-        bool do_mark_clean;
+        bool undo_dm:1;
+        bool undo_mount:1;            /* Whether to unmount /run/systemd/user-home-mount */
+        bool do_offline_fitrim:1;
+        bool do_offline_fallocate:1;
+        bool do_mark_clean:1;
+        bool do_drop_caches:1;
 
         uint64_t partition_offset;
         uint64_t partition_size;
 } HomeSetup;
 
 typedef struct PasswordCache {
-        /* Decoding passwords from security tokens is expensive and typically requires user interaction, hence cache any we already figured out. */
+        /* Decoding passwords from security tokens is expensive and typically requires user interaction,
+         * hence cache any we already figured out. */
         char **pkcs11_passwords;
         char **fido2_passwords;
 } PasswordCache;
 
 void password_cache_free(PasswordCache *cache);
+
+static inline bool password_cache_contains(const PasswordCache *cache, const char *p) {
+        if (!cache)
+                return false;
+
+        return strv_contains(cache->pkcs11_passwords, p) || strv_contains(cache->fido2_passwords, p);
+}
 
 #define HOME_SETUP_INIT                                 \
         {                                               \
@@ -53,9 +63,14 @@ void password_cache_free(PasswordCache *cache);
                 .partition_size = UINT64_MAX,           \
         }
 
-int home_setup_undo(HomeSetup *setup);
+/* Various flags for the operation of setting up a home directory */
+typedef enum HomeSetupFlags {
+        HOME_SETUP_ALREADY_ACTIVATED = 1 << 0, /* Open an already activated home, rather than activate it afresh */
+} HomeSetupFlags;
 
-int home_prepare(UserRecord *h, bool already_activated, PasswordCache *cache, HomeSetup *setup, UserRecord **ret_header_home);
+int home_setup_done(HomeSetup *setup);
+
+int home_setup(UserRecord *h, HomeSetupFlags flags, PasswordCache *cache, HomeSetup *setup, UserRecord **ret_header_home);
 
 int home_refresh(UserRecord *h, HomeSetup *setup, UserRecord *header_home, PasswordCache *cache, struct statfs *ret_statfs, UserRecord **ret_new_home);
 
@@ -68,3 +83,5 @@ int home_extend_embedded_identity(UserRecord *h, UserRecord *used, HomeSetup *se
 int user_record_authenticate(UserRecord *h, UserRecord *secret, PasswordCache *cache, bool strict_verify);
 
 int home_sync_and_statfs(int root_fd, struct statfs *ret);
+
+#define HOME_RUNTIME_WORK_DIR "/run/systemd/user-home-mount"

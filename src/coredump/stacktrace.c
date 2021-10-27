@@ -153,6 +153,8 @@ static int parse_package_metadata(const char *name, JsonVariant *id_json, Elf *e
                                             program_header->p_offset,
                                             program_header->p_filesz,
                                             ELF_T_NHDR);
+                if (!data)
+                        continue;
 
                 while (note_offset < data->d_size &&
                        (note_offset = gelf_getnote(data, note_offset, &note_header, &name_offset, &desc_offset)) > 0) {
@@ -297,6 +299,8 @@ static int module_callback(Dwfl_Module *mod, void **userdata, const char *name, 
                                             program_header->p_offset,
                                             program_header->p_filesz,
                                             ELF_T_NHDR);
+                if (!data)
+                        continue;
 
                 Elf *memelf = elf_memory(data->d_buf, data->d_size);
                 if (!memelf)

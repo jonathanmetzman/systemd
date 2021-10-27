@@ -6,6 +6,7 @@
 
 #include "missing_network.h"
 #include "netlink-util.h"
+#include "networkd-address.h"
 #include "networkd-can.h"
 #include "networkd-link.h"
 #include "networkd-manager.h"
@@ -95,9 +96,16 @@ static int set_link_handler_internal(
         return 1;
 
 on_error:
-        if (op == SET_LINK_FLAGS) {
+        switch (op) {
+        case SET_LINK_FLAGS:
                 assert(link->set_flags_messages > 0);
                 link->set_flags_messages--;
+                break;
+        case SET_LINK_MASTER:
+                link->master_set = true;
+                break;
+        default:
+                break;
         }
 
         return 0;
@@ -106,7 +114,7 @@ on_error:
 static int link_set_addrgen_mode_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
         int r;
 
-        r = set_link_handler_internal(rtnl, m, link, SET_LINK_ADDRESS_GENERATION_MODE, true, NULL);
+        r = set_link_handler_internal(rtnl, m, link, SET_LINK_ADDRESS_GENERATION_MODE, /* ignore = */ true, NULL);
         if (r <= 0)
                 return r;
 
@@ -120,31 +128,31 @@ static int link_set_addrgen_mode_handler(sd_netlink *rtnl, sd_netlink_message *m
 }
 
 static int link_set_bond_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return set_link_handler_internal(rtnl, m, link, SET_LINK_BOND, false, NULL);
+        return set_link_handler_internal(rtnl, m, link, SET_LINK_BOND, /* ignore = */ false, NULL);
 }
 
 static int link_set_bridge_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return set_link_handler_internal(rtnl, m, link, SET_LINK_BRIDGE, false, NULL);
+        return set_link_handler_internal(rtnl, m, link, SET_LINK_BRIDGE, /* ignore = */ true, NULL);
 }
 
 static int link_set_bridge_vlan_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return set_link_handler_internal(rtnl, m, link, SET_LINK_BRIDGE_VLAN, false, NULL);
+        return set_link_handler_internal(rtnl, m, link, SET_LINK_BRIDGE_VLAN, /* ignore = */ false, NULL);
 }
 
 static int link_set_can_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return set_link_handler_internal(rtnl, m, link, SET_LINK_CAN, false, NULL);
+        return set_link_handler_internal(rtnl, m, link, SET_LINK_CAN, /* ignore = */ false, NULL);
 }
 
 static int link_set_flags_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return set_link_handler_internal(rtnl, m, link, SET_LINK_FLAGS, false, get_link_update_flag_handler);
+        return set_link_handler_internal(rtnl, m, link, SET_LINK_FLAGS, /* ignore = */ false, get_link_update_flag_handler);
 }
 
 static int link_set_group_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return set_link_handler_internal(rtnl, m, link, SET_LINK_GROUP, false, NULL);
+        return set_link_handler_internal(rtnl, m, link, SET_LINK_GROUP, /* ignore = */ false, NULL);
 }
 
 static int link_set_mac_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return set_link_handler_internal(rtnl, m, link, SET_LINK_MAC, true, get_link_default_handler);
+        return set_link_handler_internal(rtnl, m, link, SET_LINK_MAC, /* ignore = */ true, get_link_default_handler);
 }
 
 static int link_set_mac_allow_retry_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
@@ -180,13 +188,18 @@ static int link_set_mac_allow_retry_handler(sd_netlink *rtnl, sd_netlink_message
 }
 
 static int link_set_master_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return set_link_handler_internal(rtnl, m, link, SET_LINK_MASTER, false, get_link_master_handler);
+        return set_link_handler_internal(rtnl, m, link, SET_LINK_MASTER, /* ignore = */ false, get_link_master_handler);
+}
+
+static int link_unset_master_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
+        /* Some devices do not support setting master ifindex. Let's ignore error on unsetting master ifindex. */
+        return set_link_handler_internal(rtnl, m, link, SET_LINK_MASTER, /* ignore = */ true, get_link_master_handler);
 }
 
 static int link_set_mtu_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
         int r;
 
-        r = set_link_handler_internal(rtnl, m, link, SET_LINK_MTU, true, get_link_default_handler);
+        r = set_link_handler_internal(rtnl, m, link, SET_LINK_MTU, /* ignore = */ true, get_link_default_handler);
         if (r <= 0)
                 return r;
 
@@ -217,8 +230,12 @@ static int link_configure(
 
         log_link_debug(link, "Setting %s", set_link_operation_to_string(op));
 
-        if (IN_SET(op, SET_LINK_BOND, SET_LINK_CAN)) {
+        if (op == SET_LINK_BOND) {
                 r = sd_rtnl_message_new_link(link->manager->rtnl, &req, RTM_NEWLINK, link->master_ifindex);
+                if (r < 0)
+                        return log_link_debug_errno(link, r, "Could not allocate RTM_NEWLINK message: %m");
+        } else if (op == SET_LINK_CAN) {
+                r = sd_rtnl_message_new_link(link->manager->rtnl, &req, RTM_NEWLINK, link->ifindex);
                 if (r < 0)
                         return log_link_debug_errno(link, r, "Could not allocate RTM_NEWLINK message: %m");
         } else {
@@ -389,7 +406,7 @@ static int link_configure(
                 if (r < 0)
                         return log_link_debug_errno(link, r, "Could not open IFLA_AF_SPEC container: %m");
 
-                if (!link->network->bridge) {
+                if (link->master_ifindex <= 0) {
                         /* master needs BRIDGE_FLAGS_SELF flag */
                         r = sd_netlink_message_append_u16(req, IFLA_BRIDGE_FLAGS, BRIDGE_FLAGS_SELF);
                         if (r < 0)
@@ -460,7 +477,7 @@ static int link_configure(
                         return log_link_debug_errno(link, r, "Could not append IFLA_MTU attribute: %m");
                 break;
         default:
-                assert_not_reached("Invalid set link operation");
+                assert_not_reached();
         }
 
         r = netlink_call_async(link->manager->rtnl, NULL, req, callback,
@@ -499,8 +516,15 @@ static bool link_is_ready_to_call_set_link(Request *req) {
         switch (op) {
         case SET_LINK_BOND:
         case SET_LINK_BRIDGE:
+                if (!link->master_set)
+                        return false;
+                if (link->network->keep_master && link->master_ifindex <= 0)
+                        return false;
+                break;
         case SET_LINK_BRIDGE_VLAN:
                 if (!link->master_set)
+                        return false;
+                if (link->network->keep_master && link->master_ifindex <= 0 && !streq_ptr(link->kind, "bridge"))
                         return false;
                 break;
         case SET_LINK_CAN:
@@ -656,8 +680,18 @@ int link_request_to_set_bond(Link *link) {
         assert(link);
         assert(link->network);
 
-        if (!link->network->bond)
-                return 0;
+        if (!link->network->bond) {
+                Link *master;
+
+                if (!link->network->keep_master)
+                        return 0;
+
+                if (link_get_master(link, &master) < 0)
+                        return 0;
+
+                if (!streq_ptr(master->kind, "bond"))
+                        return 0;
+        }
 
         return link_request_set_link(link, SET_LINK_BOND, link_set_bond_handler, NULL);
 }
@@ -666,8 +700,18 @@ int link_request_to_set_bridge(Link *link) {
         assert(link);
         assert(link->network);
 
-        if (!link->network->bridge)
-                return 0;
+        if (!link->network->bridge) {
+                Link *master;
+
+                if (!link->network->keep_master)
+                        return 0;
+
+                if (link_get_master(link, &master) < 0)
+                        return 0;
+
+                if (!streq_ptr(master->kind, "bridge"))
+                        return 0;
+        }
 
         return link_request_set_link(link, SET_LINK_BRIDGE, link_set_bridge_handler, NULL);
 }
@@ -679,8 +723,18 @@ int link_request_to_set_bridge_vlan(Link *link) {
         if (!link->network->use_br_vlan)
                 return 0;
 
-        if (!link->network->bridge && !streq_ptr(link->kind, "bridge"))
-                return 0;
+        if (!link->network->bridge && !streq_ptr(link->kind, "bridge")) {
+                Link *master;
+
+                if (!link->network->keep_master)
+                        return 0;
+
+                if (link_get_master(link, &master) < 0)
+                        return 0;
+
+                if (!streq_ptr(master->kind, "bridge"))
+                        return 0;
+        }
 
         return link_request_set_link(link, SET_LINK_BRIDGE_VLAN, link_set_bridge_vlan_handler, NULL);
 }
@@ -745,10 +799,19 @@ int link_request_to_set_mac(Link *link, bool allow_retry) {
 
 int link_request_to_set_master(Link *link) {
         assert(link);
+        assert(link->network);
+
+        if (link->network->keep_master) {
+                link->master_set = true;
+                return 0;
+        }
 
         link->master_set = false;
 
-        return link_request_set_link(link, SET_LINK_MASTER, link_set_master_handler, NULL);
+        if (link->network->batadv || link->network->bond || link->network->bridge || link->network->vrf)
+                return link_request_set_link(link, SET_LINK_MASTER, link_set_master_handler, NULL);
+        else
+                return link_request_set_link(link, SET_LINK_MASTER, link_unset_master_handler, NULL);
 }
 
 int link_request_to_set_mtu(Link *link, uint32_t mtu) {
@@ -998,7 +1061,7 @@ int link_request_to_activate(Link *link) {
                 up = false;
                 break;
         default:
-                assert_not_reached("invalid activation policy");
+                assert_not_reached();
         }
 
         link->activated = false;

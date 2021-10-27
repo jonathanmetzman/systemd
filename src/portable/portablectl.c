@@ -10,6 +10,7 @@
 #include "bus-locator.h"
 #include "bus-unit-util.h"
 #include "bus-wait-for-jobs.h"
+#include "chase-symlinks.h"
 #include "def.h"
 #include "dirent-util.h"
 #include "env-file.h"
@@ -24,8 +25,8 @@
 #include "parse-argument.h"
 #include "parse-util.h"
 #include "path-util.h"
-#include "pretty-print.h"
 #include "portable.h"
+#include "pretty-print.h"
 #include "spawn-polkit-agent.h"
 #include "string-util.h"
 #include "strv.h"
@@ -1288,7 +1289,7 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
         }
 

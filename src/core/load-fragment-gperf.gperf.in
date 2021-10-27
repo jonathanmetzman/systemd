@@ -81,6 +81,7 @@
 {{type}}.RestrictAddressFamilies,          config_parse_warn_compat,                    DISABLED_CONFIGURATION,             0
 {{type}}.LockPersonality,                  config_parse_warn_compat,                    DISABLED_CONFIGURATION,             0
 {% endif %}
+{{type}}.RestrictFileSystems,              config_parse_restrict_filesystems,           0,                                  offsetof({{type}}, exec_context)
 {{type}}.LimitCPU,                         config_parse_rlimit,                         RLIMIT_CPU,                         offsetof({{type}}, exec_context.rlimit)
 {{type}}.LimitFSIZE,                       config_parse_rlimit,                         RLIMIT_FSIZE,                       offsetof({{type}}, exec_context.rlimit)
 {{type}}.LimitDATA,                        config_parse_rlimit,                         RLIMIT_DATA,                        offsetof({{type}}, exec_context.rlimit)
@@ -105,6 +106,7 @@
 {{type}}.InaccessiblePaths,                config_parse_namespace_path_strv,            0,                                  offsetof({{type}}, exec_context.inaccessible_paths)
 {{type}}.ExecPaths,                        config_parse_namespace_path_strv,            0,                                  offsetof({{type}}, exec_context.exec_paths)
 {{type}}.NoExecPaths,                      config_parse_namespace_path_strv,            0,                                  offsetof({{type}}, exec_context.no_exec_paths)
+{{type}}.ExecSearchPath,                   config_parse_colon_separated_paths,          0,                                  offsetof({{type}}, exec_context.exec_search_path)
 {{type}}.BindPaths,                        config_parse_bind_paths,                     0,                                  offsetof({{type}}, exec_context)
 {{type}}.BindReadOnlyPaths,                config_parse_bind_paths,                     0,                                  offsetof({{type}}, exec_context)
 {{type}}.TemporaryFileSystem,              config_parse_temporary_filesystems,          0,                                  offsetof({{type}}, exec_context)
@@ -181,8 +183,10 @@
 
 {%- macro CGROUP_CONTEXT_CONFIG_ITEMS(type) -%}
 {{type}}.Slice,                            config_parse_unit_slice,                     0,                                  0
-{{type}}.AllowedCPUs,                      config_parse_allowed_cpus,                   0,                                  offsetof({{type}}, cgroup_context)
-{{type}}.AllowedMemoryNodes,               config_parse_allowed_mems,                   0,                                  offsetof({{type}}, cgroup_context)
+{{type}}.AllowedCPUs,                      config_parse_allowed_cpuset,                 0,                                  offsetof({{type}}, cgroup_context.cpuset_cpus)
+{{type}}.StartupAllowedCPUs,               config_parse_allowed_cpuset,                 0,                                  offsetof({{type}}, cgroup_context.startup_cpuset_cpus)
+{{type}}.AllowedMemoryNodes,               config_parse_allowed_cpuset,                 0,                                  offsetof({{type}}, cgroup_context.cpuset_mems)
+{{type}}.StartupAllowedMemoryNodes,        config_parse_allowed_cpuset,                 0,                                  offsetof({{type}}, cgroup_context.startup_cpuset_mems)
 {{type}}.CPUAccounting,                    config_parse_bool,                           0,                                  offsetof({{type}}, cgroup_context.cpu_accounting)
 {{type}}.CPUWeight,                        config_parse_cg_weight,                      0,                                  offsetof({{type}}, cgroup_context.cpu_weight)
 {{type}}.StartupCPUWeight,                 config_parse_cg_weight,                      0,                                  offsetof({{type}}, cgroup_context.startup_cpu_weight)
@@ -221,8 +225,8 @@
 {{type}}.Delegate,                         config_parse_delegate,                       0,                                  offsetof({{type}}, cgroup_context)
 {{type}}.DisableControllers,               config_parse_disable_controllers,            0,                                  offsetof({{type}}, cgroup_context)
 {{type}}.IPAccounting,                     config_parse_bool,                           0,                                  offsetof({{type}}, cgroup_context.ip_accounting)
-{{type}}.IPAddressAllow,                   config_parse_ip_address_access,              0,                                  offsetof({{type}}, cgroup_context.ip_address_allow)
-{{type}}.IPAddressDeny,                    config_parse_ip_address_access,              0,                                  offsetof({{type}}, cgroup_context.ip_address_deny)
+{{type}}.IPAddressAllow,                   config_parse_in_addr_prefixes,               AF_UNSPEC,                          offsetof({{type}}, cgroup_context.ip_address_allow)
+{{type}}.IPAddressDeny,                    config_parse_in_addr_prefixes,               AF_UNSPEC,                          offsetof({{type}}, cgroup_context.ip_address_deny)
 {{type}}.IPIngressFilterPath,              config_parse_ip_filter_bpf_progs,            0,                                  offsetof({{type}}, cgroup_context.ip_filters_ingress)
 {{type}}.IPEgressFilterPath,               config_parse_ip_filter_bpf_progs,            0,                                  offsetof({{type}}, cgroup_context.ip_filters_egress)
 {{type}}.ManagedOOMSwap,                   config_parse_managed_oom_mode,               0,                                  offsetof({{type}}, cgroup_context.moom_swap)
@@ -233,6 +237,7 @@
 {{type}}.BPFProgram,                       config_parse_bpf_foreign_program,            0,                                  offsetof({{type}}, cgroup_context)
 {{type}}.SocketBindAllow,                  config_parse_cgroup_socket_bind,             0,                                  offsetof({{type}}, cgroup_context.socket_bind_allow)
 {{type}}.SocketBindDeny,                   config_parse_cgroup_socket_bind,             0,                                  offsetof({{type}}, cgroup_context.socket_bind_deny)
+{{type}}.RestrictNetworkInterfaces,        config_parse_restrict_network_interfaces,    0,                                  offsetof({{type}}, cgroup_context)
 {%- endmacro -%}
 
 %{
@@ -242,6 +247,7 @@ _Pragma("GCC diagnostic ignored \"-Wimplicit-fallthrough\"")
 #include <stddef.h>
 #include "all-units.h"
 #include "conf-parser.h"
+#include "in-addr-prefix-util.h"
 #include "load-fragment.h"
 %}
 struct ConfigPerfItem;
@@ -377,6 +383,7 @@ Service.TimeoutAbortSec,                 config_parse_service_timeout_abort,    
 Service.TimeoutStartFailureMode,         config_parse_service_timeout_failure_mode,   0,                                  offsetof(Service, timeout_start_failure_mode)
 Service.TimeoutStopFailureMode,          config_parse_service_timeout_failure_mode,   0,                                  offsetof(Service, timeout_stop_failure_mode)
 Service.RuntimeMaxSec,                   config_parse_sec,                            0,                                  offsetof(Service, runtime_max_usec)
+Service.RuntimeRandomizedExtraSec,       config_parse_sec,                            0,                                  offsetof(Service, runtime_rand_extra_usec)
 Service.WatchdogSec,                     config_parse_sec,                            0,                                  offsetof(Service, watchdog_usec)
 {# The following five only exist for compatibility, they moved into Unit, see above #}
 Service.StartLimitInterval,              config_parse_sec,                            0,                                  offsetof(Unit, start_ratelimit.interval)
@@ -529,6 +536,7 @@ Path.DirectoryMode,                      config_parse_mode,                     
 {{ CGROUP_CONTEXT_CONFIG_ITEMS('Scope') }}
 {{ KILL_CONTEXT_CONFIG_ITEMS('Scope') }}
 Scope.RuntimeMaxSec,                     config_parse_sec,                            0,                                  offsetof(Scope, runtime_max_usec)
+Scope.RuntimeRandomizedExtraSec,         config_parse_sec,                            0,                                  offsetof(Scope, runtime_rand_extra_usec)
 Scope.TimeoutStopSec,                    config_parse_sec,                            0,                                  offsetof(Scope, timeout_stop_usec)
 {# The [Install] section is ignored here #}
 Install.Alias,                           NULL,                                        0,                                  0

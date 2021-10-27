@@ -11,7 +11,7 @@
 #include "capability-util.h"
 #include "fileio.h"
 #include "format-util.h"
-#include "locale-util.h"
+#include "glyph-util.h"
 #include "macro.h"
 #include "string-util.h"
 #include "strv.h"
@@ -259,7 +259,7 @@ _public_ int sd_bus_message_dump(sd_bus_message *m, FILE *f, uint64_t flags) {
                         break;
 
                 default:
-                        assert_not_reached("Unknown basic type.");
+                        assert_not_reached();
                 }
         }
 

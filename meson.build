@@ -35,7 +35,7 @@ conf.set10('BUILD_MODE_DEVELOPER', get_option('mode') == 'developer',
 
 want_ossfuzz = get_option('oss-fuzz')
 want_libfuzzer = get_option('llvm-fuzz')
-if want_ossfuzz + want_libfuzzer > 1
+if want_ossfuzz and want_libfuzzer
         error('only one of oss-fuzz or llvm-fuzz can be specified')
 endif
 
@@ -252,6 +252,7 @@ conf.set_quoted('SYSTEMD_GROWFS_PATH',                        rootlibexecdir / '
 conf.set_quoted('SYSTEMD_HOMEWORK_PATH',                      rootlibexecdir / 'systemd-homework')
 conf.set_quoted('SYSTEMD_IMPORT_FS_PATH',                     rootlibexecdir / 'systemd-import-fs')
 conf.set_quoted('SYSTEMD_IMPORT_PATH',                        rootlibexecdir / 'systemd-import')
+conf.set_quoted('SYSTEMD_INTEGRITYSETUP_PATH',                rootlibexecdir / 'systemd-integritysetup')
 conf.set_quoted('SYSTEMD_KBD_MODEL_MAP',                      pkgdatadir / 'kbd-model-map')
 conf.set_quoted('SYSTEMD_LANGUAGE_FALLBACK_MAP',              pkgdatadir / 'language-fallback-map')
 conf.set_quoted('SYSTEMD_MAKEFS_PATH',                        rootlibexecdir / 'systemd-makefs')
@@ -340,11 +341,13 @@ possible_common_cc_flags = [
         '-Werror=format=2',
         '-Werror=implicit-function-declaration',
         '-Werror=incompatible-pointer-types',
+        '-Werror=int-conversion',
         '-Werror=overflow',
         '-Werror=return-type',
         '-Werror=shift-count-overflow',
         '-Werror=shift-overflow=2',
         '-Werror=undef',
+        '-Werror=unused-function',
         '-Wfloat-equal',
         '-Wimplicit-fallthrough=5',
         '-Winit-self',
@@ -500,6 +503,8 @@ foreach ident : [
                                  #include <unistd.h>'''],
         ['pivot_root',        '''#include <stdlib.h>
                                  #include <unistd.h>'''],     # no known header declares pivot_root
+        ['ioprio_get',        '''#include <sched.h>'''],      # no known header declares ioprio_get
+        ['ioprio_set',        '''#include <sched.h>'''],      # no known header declares ioprio_set
         ['name_to_handle_at', '''#include <sys/types.h>
                                  #include <sys/stat.h>
                                  #include <fcntl.h>'''],
@@ -542,6 +547,7 @@ foreach ident : [
         ['mount_setattr',     '''#include <sys/mount.h>'''],
         ['move_mount',        '''#include <sys/mount.h>'''],
         ['open_tree',         '''#include <sys/mount.h>'''],
+        ['getdents64',        '''#include <dirent.h>'''],
 ]
 
         have = cc.has_function(ident[0], prefix : ident[1], args : '-D_GNU_SOURCE')
@@ -703,8 +709,30 @@ else
         conf.set('DEFAULT_HIERARCHY', 'CGROUP_UNIFIED_ALL')
 endif
 
+extra_net_naming_schemes = []
+extra_net_naming_map = []
+foreach scheme: get_option('extra-net-naming-schemes').split(',')
+        if scheme != ''
+                name = scheme.split('=')[0]
+                value = scheme.split('=')[1]
+                NAME = name.underscorify().to_upper()
+                VALUE = []
+                foreach field: value.split('+')
+                        VALUE += 'NAMING_' + field.underscorify().to_upper()
+                endforeach
+                extra_net_naming_schemes += 'NAMING_@0@ = @1@,'.format(NAME, '|'.join(VALUE))
+                extra_net_naming_map += '{ "@0@", NAMING_@1@ },'.format(name, NAME)
+        endif
+endforeach
+conf.set('EXTRA_NET_NAMING_SCHEMES', ' '.join(extra_net_naming_schemes))
+conf.set('EXTRA_NET_NAMING_MAP', ' '.join(extra_net_naming_map))
+
 default_net_naming_scheme = get_option('default-net-naming-scheme')
 conf.set_quoted('DEFAULT_NET_NAMING_SCHEME', default_net_naming_scheme)
+if default_net_naming_scheme != 'latest'
+        conf.set('_DEFAULT_NET_NAMING_SCHEME_TEST',
+                 'NAMING_' + default_net_naming_scheme.underscorify().to_upper())
+endif
 
 time_epoch = get_option('time-epoch')
 if time_epoch == -1
@@ -721,6 +749,8 @@ if time_epoch == -1
         time_epoch = time_epoch.to_int()
 endif
 conf.set('TIME_EPOCH', time_epoch)
+
+conf.set('CLOCK_VALID_RANGE_USEC_MAX', get_option('clock-valid-range-usec-max'))
 
 foreach tuple : [['system-alloc-uid-min', 'SYS_UID_MIN', 1],  # Also see login.defs(5).
                  ['system-uid-max',       'SYS_UID_MAX', 999],
@@ -1021,8 +1051,11 @@ else
 endif
 conf.set10('HAVE_APPARMOR', have)
 
-conf.set10('HAVE_SMACK_RUN_LABEL', get_option('smack-run-label') != '')
-conf.set_quoted('SMACK_RUN_LABEL', get_option('smack-run-label'))
+have = get_option('smack') and get_option('smack-run-label') != ''
+conf.set10('HAVE_SMACK_RUN_LABEL', have)
+if have
+        conf.set_quoted('SMACK_RUN_LABEL', get_option('smack-run-label'))
+endif
 
 want_polkit = get_option('polkit')
 install_polkit = false
@@ -1628,12 +1661,14 @@ if get_option('efi')
 
         have = true
         conf.set_quoted('EFI_MACHINE_TYPE_NAME', EFI_MACHINE_TYPE_NAME)
-
-        conf.set('SD_TPM_PCR', get_option('tpm-pcrindex'))
 else
         have = false
 endif
 conf.set10('ENABLE_EFI', have)
+
+subdir('src/fundamental')
+subdir('src/boot/efi')
+conf.set10('HAVE_GNU_EFI', have_gnu_efi)
 
 ############################################################
 
@@ -1687,7 +1722,6 @@ includes = [libsystemd_includes, include_directories('src/shared')]
 
 subdir('po')
 subdir('catalog')
-subdir('src/fundamental')
 subdir('src/basic')
 subdir('src/libsystemd')
 subdir('src/shared')
@@ -1784,6 +1818,34 @@ if conf.get('HAVE_LIBCRYPTSETUP_PLUGINS') == 1
                         install : true,
                         install_dir : libcryptsetup_plugins_dir)
         endif
+
+        if conf.get('HAVE_LIBFIDO2') == 1
+                cryptsetup_token_systemd_fido2 = shared_library(
+                        'cryptsetup-token-systemd-fido2',
+                        link_args : ['-shared',
+                                     '-Wl,--version-script=' + cryptsetup_token_sym_path],
+                        dependencies : libshared_deps + [libcryptsetup, versiondep],
+                        link_with : [libshared],
+                        link_whole : [cryptsetup_token_systemd_fido2_static],
+                        link_depends : cryptsetup_token_sym,
+                        install_rpath : rootlibexecdir,
+                        install : true,
+                        install_dir : libcryptsetup_plugins_dir)
+        endif
+
+        if conf.get('HAVE_P11KIT') == 1
+                cryptsetup_token_systemd_pkcs11 = shared_library(
+                        'cryptsetup-token-systemd-pkcs11',
+                        link_args : ['-shared',
+                                     '-Wl,--version-script=' + cryptsetup_token_sym_path],
+                        dependencies : libshared_deps + [libcryptsetup, versiondep],
+                        link_with : [libshared],
+                        link_whole : [cryptsetup_token_systemd_pkcs11_static],
+                        link_depends : cryptsetup_token_sym,
+                        install_rpath : rootlibexecdir,
+                        install : true,
+                        install_dir : libcryptsetup_plugins_dir)
+        endif
 endif
 
 ############################################################
@@ -1796,7 +1858,6 @@ subdir('src/journal')
 subdir('src/libsystemd-network')
 
 subdir('src/analyze')
-subdir('src/boot/efi')
 subdir('src/busctl')
 subdir('src/coredump')
 subdir('src/cryptenroll')
@@ -2190,7 +2251,7 @@ if conf.get('HAVE_PAM') == 1
                 install_dir : rootlibexecdir)
 endif
 
-if conf.get('ENABLE_EFI') == 1 and conf.get('HAVE_BLKID') == 1
+if conf.get('HAVE_BLKID') == 1 and conf.get('HAVE_GNU_EFI') == 1
         public_programs += executable(
                 'bootctl',
                 'src/boot/bootctl.c',
@@ -2260,7 +2321,7 @@ if conf.get('ENABLE_PORTABLED') == 1
                 systemd_portabled_sources,
                 include_directories : includes,
                 link_with : [libshared],
-                dependencies : [threads],
+                dependencies : [threads, libselinux],
                 install_rpath : rootlibexecdir,
                 install : true,
                 install_dir : rootlibexecdir)
@@ -2475,6 +2536,25 @@ if conf.get('HAVE_LIBCRYPTSETUP') == 1
                                 libp11kit],
                 install_rpath : rootlibexecdir,
                 install : true)
+
+        executable(
+                'systemd-integritysetup',
+                ['src/integritysetup/integritysetup.c', 'src/integritysetup/integrity-util.c'],
+                include_directories : includes,
+                link_with : [libshared],
+                dependencies : [libcryptsetup],
+                install_rpath : rootlibexecdir,
+                install : true,
+                install_dir : rootlibexecdir)
+
+        executable(
+                'systemd-integritysetup-generator',
+                ['src/integritysetup/integritysetup-generator.c', 'src/integritysetup/integrity-util.c'],
+                include_directories : includes,
+                link_with : [libshared],
+                install_rpath : rootlibexecdir,
+                install : true,
+                install_dir : systemgeneratordir)
 endif
 
 if conf.get('HAVE_SYSV_COMPAT') == 1
@@ -2538,8 +2618,9 @@ endif
 
 if conf.get('ENABLE_LOCALED') == 1
         if conf.get('HAVE_XKBCOMMON') == 1
-                # logind will load libxkbcommon.so dynamically on its own
-                deps = [libdl]
+                # logind will load libxkbcommon.so dynamically on its own, but we still
+                # need to specify where the headers are
+                deps = [libdl, libxkbcommon.partial_dependency(compile_args: true)]
         else
                 deps = []
         endif
@@ -3591,6 +3672,9 @@ install_data('LICENSE.GPL2',
              'docs/GVARIANT-SERIALIZATION.md',
              install_dir : docdir)
 
+install_subdir('LICENSES',
+               install_dir : docdir)
+
 meson.add_install_script('sh', '-c', mkdir_p.format(systemdstatedir))
 meson.add_install_script('sh', '-c', 'touch $DESTDIR@0@'.format(prefixdir))
 
@@ -3799,7 +3883,7 @@ summary({
 # LDFLAGS:  ${OUR_LDFLAGS} ${LDFLAGS}
 
 if conf.get('ENABLE_EFI') == 1
-        summary({'efi arch' : efi_arch},
+        summary({'EFI arch' : efi_arch},
                 section : 'Extensible Firmware Interface')
 
         if have_gnu_efi

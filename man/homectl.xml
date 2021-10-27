@@ -288,12 +288,16 @@
       </varlistentry>
 
       <varlistentry>
-        <term><option>--setenv=</option><replaceable>VARIABLE</replaceable>=<replaceable>VALUE</replaceable></term>
+        <term><option>--setenv=</option><replaceable>VARIABLE</replaceable>[=<replaceable>VALUE</replaceable>]</term>
 
-        <listitem><para>Takes an environment variable assignment to set for all user processes. Note that a
-        number of other settings also result in environment variables to be set for the user, including
-        <option>--email=</option>, <option>--timezone=</option> and <option>--language=</option>. May be used
-        multiple times to set multiple environment variables.</para></listitem>
+        <listitem><para>Takes an environment variable assignment to set for all user processes. May be used
+        multiple times to set multiple environment variables. When <literal>=</literal> and
+        <replaceable>VALUE</replaceable> are omitted, the value of the variable with the same name in the
+        program environment will be used.</para>
+
+        <para>Note that a number of other settings also result in environment variables to be set for the
+        user, including <option>--email=</option>, <option>--timezone=</option> and
+        <option>--language=</option>.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -604,6 +608,17 @@
         example a USB stick) pass the path to the block device here. Specifying the path to a directory here
         when using LUKS2 storage is not allowed. Similar, specifying the path to a regular file or device
         node is not allowed if any of the other storage backends are used.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--drop-caches=</option><replaceable>BOOL</replaceable></term>
+
+        <listitem><para>Automatically flush OS file system caches on logout. This is useful in combination
+        with the fscrypt storage backend to ensure the OS does not keep decrypted versions of the files and
+        directories in memory (and accessible) after logout. This option is also supported on other backends,
+        but should not bring any benefit there. Defaults to off, except if the selected storage backend is
+        fscrypt, where it defaults to on. Note that flushing OS caches will negatively influence performance
+        of the OS shortly after logout.</para></listitem>
       </varlistentry>
 
       <varlistentry>

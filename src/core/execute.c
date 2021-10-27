@@ -41,9 +41,11 @@
 #endif
 #include "async.h"
 #include "barrier.h"
+#include "bpf-lsm.h"
 #include "cap-list.h"
 #include "capability-util.h"
 #include "cgroup-setup.h"
+#include "chase-symlinks.h"
 #include "chown-recursive.h"
 #include "cpu-set-util.h"
 #include "creds-util.h"
@@ -58,11 +60,9 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-util.h"
-#include "fs-util.h"
 #include "glob-util.h"
 #include "hexdecoct.h"
 #include "io-util.h"
-#include "ioprio.h"
 #include "label.h"
 #include "log.h"
 #include "macro.h"
@@ -70,6 +70,7 @@
 #include "manager-dump.h"
 #include "memory-util.h"
 #include "missing_fs.h"
+#include "missing_ioprio.h"
 #include "mkdir.h"
 #include "mount-util.h"
 #include "mountpoint-util.h"
@@ -544,7 +545,7 @@ static int setup_input(
         }
 
         default:
-                assert_not_reached("Unknown input type");
+                assert_not_reached();
         }
 }
 
@@ -730,7 +731,7 @@ static int setup_output(
         }
 
         default:
-                assert_not_reached("Unknown error type");
+                assert_not_reached();
         }
 }
 
@@ -923,7 +924,7 @@ static int ask_for_confirmation(const char *vc, Unit *u, const char *cmdline) {
                         r = CONFIRM_EXECUTE;
                         break;
                 default:
-                        assert_not_reached("Unhandled choice");
+                        assert_not_reached();
                 }
                 break;
         }
@@ -1684,6 +1685,29 @@ static int apply_restrict_namespaces(const Unit *u, const ExecContext *c) {
 
         return seccomp_restrict_namespaces(c->restrict_namespaces);
 }
+
+#if HAVE_LIBBPF
+static bool skip_lsm_bpf_unsupported(const Unit* u, const char* msg) {
+        if (lsm_bpf_supported())
+                return false;
+
+        log_unit_debug(u, "LSM BPF not supported, skipping %s", msg);
+        return true;
+}
+
+static int apply_restrict_filesystems(Unit *u, const ExecContext *c) {
+        assert(u);
+        assert(c);
+
+        if (!exec_context_restrict_filesystems_set(c))
+                return 0;
+
+        if (skip_lsm_bpf_unsupported(u, "RestrictFileSystems="))
+                return 0;
+
+        return lsm_bpf_unit_restrict_filesystems(u, c->restrict_filesystems, c->restrict_filesystems_allow_list);
+}
+#endif
 
 static int apply_lock_personality(const Unit* u, const ExecContext *c) {
         unsigned long personality;
@@ -3742,7 +3766,7 @@ static int exec_child(
                 int user_lookup_fd,
                 int *exit_status) {
 
-        _cleanup_strv_free_ char **our_env = NULL, **pass_env = NULL, **accum_env = NULL, **replaced_argv = NULL;
+        _cleanup_strv_free_ char **our_env = NULL, **pass_env = NULL, **joined_exec_search_path = NULL, **accum_env = NULL, **replaced_argv = NULL;
         int r, ngids = 0, exec_fd;
         _cleanup_free_ gid_t *supplementary_gids = NULL;
         const char *username = NULL, *groupname = NULL;
@@ -3813,7 +3837,7 @@ static int exec_child(
         /* In case anything used libc syslog(), close this here, too */
         closelog();
 
-        int keep_fds[n_fds + 2];
+        int keep_fds[n_fds + 3];
         memcpy_safe(keep_fds, fds, n_fds * sizeof(int));
         n_keep_fds = n_fds;
 
@@ -3822,6 +3846,24 @@ static int exec_child(
                 *exit_status = EXIT_FDS;
                 return log_unit_error_errno(unit, r, "Failed to shift fd and set FD_CLOEXEC: %m");
         }
+
+#if HAVE_LIBBPF
+        if (MANAGER_IS_SYSTEM(unit->manager) && lsm_bpf_supported()) {
+                int bpf_map_fd = -1;
+
+                bpf_map_fd = lsm_bpf_map_restrict_fs_fd(unit);
+                if (bpf_map_fd < 0) {
+                        *exit_status = EXIT_FDS;
+                        return log_unit_error_errno(unit, r, "Failed to get restrict filesystems BPF map fd: %m");
+                }
+
+                r = add_shifted_fd(keep_fds, ELEMENTSOF(keep_fds), &n_keep_fds, bpf_map_fd, &bpf_map_fd);
+                if (r < 0) {
+                        *exit_status = EXIT_FDS;
+                        return log_unit_error_errno(unit, r, "Failed to shift fd and set FD_CLOEXEC: %m");
+                }
+        }
+#endif
 
         r = close_remaining_fds(params, runtime, dcreds, user_lookup_fd, socket_fd, keep_fds, n_keep_fds);
         if (r < 0) {
@@ -4094,13 +4136,17 @@ static int exec_child(
                 }
         }
 
-        if (context->utmp_id)
+        if (context->utmp_id) {
+                const char *line = context->tty_path ?
+                        (path_startswith(context->tty_path, "/dev/") ?: context->tty_path) :
+                        NULL;
                 utmp_put_init_process(context->utmp_id, getpid_cached(), getsid(0),
-                                      context->tty_path,
+                                      line,
                                       context->utmp_mode == EXEC_UTMP_INIT  ? INIT_PROCESS :
                                       context->utmp_mode == EXEC_UTMP_LOGIN ? LOGIN_PROCESS :
                                       USER_PROCESS,
                                       username);
+        }
 
         if (uid_is_valid(uid)) {
                 r = chown_terminal(STDIN_FILENO, uid);
@@ -4158,9 +4204,31 @@ static int exec_child(
                 return log_oom();
         }
 
-        accum_env = strv_env_merge(5,
-                                   params->environment,
+        /* The PATH variable is set to the default path in params->environment.
+         * However, this is overridden if user specified fields have PATH set.
+         * The intention is to also override PATH if the user does
+         * not specify PATH and the user has specified ExecSearchPath
+         */
+
+        if (!strv_isempty(context->exec_search_path)) {
+                _cleanup_free_ char *joined = NULL;
+
+                joined = strv_join(context->exec_search_path, ":");
+                if (!joined) {
+                        *exit_status = EXIT_MEMORY;
+                        return log_oom();
+                }
+
+                r = strv_env_assign(&joined_exec_search_path, "PATH", joined);
+                if (r < 0) {
+                        *exit_status = EXIT_MEMORY;
+                        return log_oom();
+                }
+        }
+
+        accum_env = strv_env_merge(params->environment,
                                    our_env,
+                                   joined_exec_search_path,
                                    pass_env,
                                    context->environment,
                                    files_env);
@@ -4351,7 +4419,7 @@ static int exec_child(
 
         _cleanup_free_ char *executable = NULL;
         _cleanup_close_ int executable_fd = -1;
-        r = find_executable_full(command->path, false, &executable, &executable_fd);
+        r = find_executable_full(command->path, /* root= */ NULL, context->exec_search_path, false, &executable, &executable_fd);
         if (r < 0) {
                 if (r != -ENOMEM && (command->flags & EXEC_COMMAND_IGNORE_FAILURE)) {
                         log_unit_struct_errno(unit, LOG_INFO, r,
@@ -4660,6 +4728,15 @@ static int exec_child(
                         return log_unit_error_errno(unit, r, "Failed to apply system call filters: %m");
                 }
 #endif
+
+#if HAVE_LIBBPF
+                r = apply_restrict_filesystems(unit, context);
+                if (r < 0) {
+                        *exit_status = EXIT_BPF;
+                        return log_unit_error_errno(unit, r, "Failed to restrict filesystems: %m");
+                }
+#endif
+
         }
 
         if (!strv_isempty(context->unset_environment)) {
@@ -4866,7 +4943,7 @@ void exec_context_init(ExecContext *c) {
         assert(c);
 
         c->umask = 0022;
-        c->ioprio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 0);
+        c->ioprio = ioprio_prio_value(IOPRIO_CLASS_BE, 0);
         c->cpu_sched_policy = SCHED_OTHER;
         c->syslog_priority = LOG_DAEMON|LOG_INFO;
         c->syslog_level_prefix = true;
@@ -4927,6 +5004,7 @@ void exec_context_done(ExecContext *c) {
         c->inaccessible_paths = strv_free(c->inaccessible_paths);
         c->exec_paths = strv_free(c->exec_paths);
         c->no_exec_paths = strv_free(c->no_exec_paths);
+        c->exec_search_path = strv_free(c->exec_search_path);
 
         bind_mount_free_many(c->bind_mounts, c->n_bind_mounts);
         c->bind_mounts = NULL;
@@ -4943,6 +5021,8 @@ void exec_context_done(ExecContext *c) {
         c->selinux_context = mfree(c->selinux_context);
         c->apparmor_profile = mfree(c->apparmor_profile);
         c->smack_process_label = mfree(c->smack_process_label);
+
+        c->restrict_filesystems = set_free(c->restrict_filesystems);
 
         c->syscall_filter = hashmap_free(c->syscall_filter);
         c->syscall_archs = set_free(c->syscall_archs);
@@ -5214,7 +5294,7 @@ static int exec_context_load_environment(const Unit *unit, const ExecContext *c,
                         else {
                                 char **m;
 
-                                m = strv_env_merge(2, r, p);
+                                m = strv_env_merge(r, p);
                                 strv_free(r);
                                 strv_free(p);
                                 if (!m)
@@ -5428,11 +5508,11 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
         if (c->ioprio_set) {
                 _cleanup_free_ char *class_str = NULL;
 
-                r = ioprio_class_to_string_alloc(IOPRIO_PRIO_CLASS(c->ioprio), &class_str);
+                r = ioprio_class_to_string_alloc(ioprio_prio_class(c->ioprio), &class_str);
                 if (r >= 0)
                         fprintf(f, "%sIOSchedulingClass: %s\n", prefix, class_str);
 
-                fprintf(f, "%sIOPriority: %lu\n", prefix, IOPRIO_PRIO_DATA(c->ioprio));
+                fprintf(f, "%sIOPriority: %d\n", prefix, ioprio_prio_data(c->ioprio));
         }
 
         if (c->cpu_sched_set) {
@@ -5598,6 +5678,7 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
         strv_dump(f, prefix, "InaccessiblePaths", c->inaccessible_paths);
         strv_dump(f, prefix, "ExecPaths", c->exec_paths);
         strv_dump(f, prefix, "NoExecPaths", c->no_exec_paths);
+        strv_dump(f, prefix, "ExecSearchPath", c->exec_search_path);
 
         for (size_t i = 0; i < c->n_bind_mounts; i++)
                 fprintf(f, "%s%s: %s%s:%s:%s\n", prefix,
@@ -5710,6 +5791,12 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
                                 prefix, strna(s));
         }
 
+#if HAVE_LIBBPF
+        if (exec_context_restrict_filesystems_set(c))
+                SET_FOREACH(e, c->restrict_filesystems)
+                        fprintf(f, "%sRestrictFileSystems: %s\n", prefix, *e);
+#endif
+
         if (c->network_namespace_path)
                 fprintf(f,
                         "%sNetworkNamespacePath: %s\n",
@@ -5785,7 +5872,7 @@ int exec_context_get_effective_ioprio(const ExecContext *c) {
 
         p = ioprio_get(IOPRIO_WHO_PROCESS, 0);
         if (p < 0)
-                return IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 4);
+                return ioprio_prio_value(IOPRIO_CLASS_BE, 4);
 
         return p;
 }
@@ -6441,7 +6528,7 @@ int exec_runtime_deserialize_one(Manager *m, const char *value, FDSet *fds) {
         assert(fds);
 
         n = strcspn(v, " ");
-        id = strndupa(v, n);
+        id = strndupa_safe(v, n);
         if (v[n] != ' ')
                 goto finalize;
         p = v + n + 1;
@@ -6473,7 +6560,7 @@ int exec_runtime_deserialize_one(Manager *m, const char *value, FDSet *fds) {
                 char *buf;
 
                 n = strcspn(v, " ");
-                buf = strndupa(v, n);
+                buf = strndupa_safe(v, n);
 
                 r = safe_atoi(buf, &netns_fdpair[0]);
                 if (r < 0)
@@ -6492,7 +6579,7 @@ int exec_runtime_deserialize_one(Manager *m, const char *value, FDSet *fds) {
                 char *buf;
 
                 n = strcspn(v, " ");
-                buf = strndupa(v, n);
+                buf = strndupa_safe(v, n);
 
                 r = safe_atoi(buf, &netns_fdpair[1]);
                 if (r < 0)
@@ -6511,7 +6598,7 @@ int exec_runtime_deserialize_one(Manager *m, const char *value, FDSet *fds) {
                 char *buf;
 
                 n = strcspn(v, " ");
-                buf = strndupa(v, n);
+                buf = strndupa_safe(v, n);
 
                 r = safe_atoi(buf, &ipcns_fdpair[0]);
                 if (r < 0)
@@ -6530,7 +6617,7 @@ int exec_runtime_deserialize_one(Manager *m, const char *value, FDSet *fds) {
                 char *buf;
 
                 n = strcspn(v, " ");
-                buf = strndupa(v, n);
+                buf = strndupa_safe(v, n);
 
                 r = safe_atoi(buf, &ipcns_fdpair[1]);
                 if (r < 0)

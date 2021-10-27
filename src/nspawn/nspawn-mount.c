@@ -4,6 +4,7 @@
 #include <linux/magic.h>
 
 #include "alloc-util.h"
+#include "chase-symlinks.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "format-util.h"
@@ -946,7 +947,7 @@ int mount_custom(
                         break;
 
                 default:
-                        assert_not_reached("Unknown custom mount type");
+                        assert_not_reached();
                 }
 
                 if (r < 0)

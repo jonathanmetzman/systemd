@@ -10,13 +10,13 @@
 
 #include "alloc-util.h"
 #include "base-filesystem.h"
+#include "chase-symlinks.h"
 #include "dev-setup.h"
 #include "env-util.h"
 #include "escape.h"
 #include "extension-release.h"
 #include "fd-util.h"
 #include "format-util.h"
-#include "fs-util.h"
 #include "label.h"
 #include "list.h"
 #include "loop-util.h"
@@ -570,7 +570,7 @@ static int append_protect_home(MountEntry **p, ProtectHome protect_home, bool ig
                 return append_static_mounts(p, protect_home_yes_table, ELEMENTSOF(protect_home_yes_table), ignore_protect);
 
         default:
-                assert_not_reached("Unexpected ProtectHome= value");
+                assert_not_reached();
         }
 }
 
@@ -592,7 +592,7 @@ static int append_protect_system(MountEntry **p, ProtectSystem protect_system, b
                 return append_static_mounts(p, protect_system_full_table, ELEMENTSOF(protect_system_full_table), ignore_protect);
 
         default:
-                assert_not_reached("Unexpected ProtectSystem= value");
+                assert_not_reached();
         }
 }
 
@@ -853,7 +853,7 @@ static int mount_private_dev(MountEntry *m) {
         char temporary_mount[] = "/tmp/namespace-dev-XXXXXX";
         const char *d, *dev = NULL, *devpts = NULL, *devshm = NULL, *devhugepages = NULL, *devmqueue = NULL, *devlog = NULL, *devptmx = NULL;
         bool can_mknod = true;
-        _cleanup_umask_ mode_t u;
+        _unused_ _cleanup_umask_ mode_t u;
         int r;
 
         assert(m);
@@ -1359,7 +1359,7 @@ static int apply_one_mount(
                 return mount_overlay(m);
 
         default:
-                assert_not_reached("Unknown mode");
+                assert_not_reached();
         }
 
         assert(what);
@@ -1905,12 +1905,20 @@ int setup_namespace(
                                 loop_device->fd,
                                 &verity,
                                 root_image_options,
+                                loop_device->diskseq,
                                 loop_device->uevent_seqnum_not_before,
                                 loop_device->timestamp_not_before,
                                 dissect_image_flags,
                                 &dissected_image);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to dissect image: %m");
+
+                r = dissected_image_load_verity_sig_partition(
+                                dissected_image,
+                                loop_device->fd,
+                                &verity);
+                if (r < 0)
+                        return r;
 
                 r = dissected_image_decrypt(
                                 dissected_image,
@@ -2497,7 +2505,6 @@ static int make_tmp_prefix(const char *prefix) {
 static int setup_one_tmp_dir(const char *id, const char *prefix, char **path, char **tmp_path) {
         _cleanup_free_ char *x = NULL;
         _cleanup_free_ char *y = NULL;
-        char bid[SD_ID128_STRING_MAX];
         sd_id128_t boot_id;
         bool rw = true;
         int r;
@@ -2513,7 +2520,7 @@ static int setup_one_tmp_dir(const char *id, const char *prefix, char **path, ch
         if (r < 0)
                 return r;
 
-        x = strjoin(prefix, "/systemd-private-", sd_id128_to_string(boot_id, bid), "-", id, "-XXXXXX");
+        x = strjoin(prefix, "/systemd-private-", SD_ID128_TO_STRING(boot_id), "-", id, "-XXXXXX");
         if (!x)
                 return -ENOMEM;
 

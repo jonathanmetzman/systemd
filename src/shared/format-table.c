@@ -12,10 +12,10 @@
 #include "format-table.h"
 #include "format-util.h"
 #include "fs-util.h"
+#include "glyph-util.h"
 #include "gunicode.h"
 #include "id128-util.h"
 #include "in-addr-util.h"
-#include "locale-util.h"
 #include "memory-util.h"
 #include "pager.h"
 #include "parse-util.h"
@@ -145,6 +145,9 @@ struct Table {
         size_t *sort_map;     /* The columns to order rows by, in order of preference. */
         size_t n_sort_map;
 
+        char **json_fields;
+        size_t n_json_fields;
+
         bool *reverse_map;
 
         char *empty_string;
@@ -241,6 +244,11 @@ Table *table_unref(Table *t) {
         free(t->reverse_map);
         free(t->empty_string);
 
+        for (size_t i = 0; i < t->n_json_fields; i++)
+                free(t->json_fields[i]);
+
+        free(t->json_fields);
+
         return mfree(t);
 }
 
@@ -259,6 +267,7 @@ static size_t table_data_size(TableDataType type, const void *data) {
         case TABLE_STRV_WRAPPED:
                 return sizeof(char **);
 
+        case TABLE_BOOLEAN_CHECKMARK:
         case TABLE_BOOLEAN:
                 return sizeof(bool);
 
@@ -316,7 +325,7 @@ static size_t table_data_size(TableDataType type, const void *data) {
                 return sizeof(mode_t);
 
         default:
-                assert_not_reached("Uh? Unexpected cell type");
+                assert_not_reached();
         }
 }
 
@@ -840,6 +849,7 @@ int table_add_many_internal(Table *t, TableDataType first_type, ...) {
                         data = va_arg(ap, char * const *);
                         break;
 
+                case TABLE_BOOLEAN_CHECKMARK:
                 case TABLE_BOOLEAN:
                         buffer.b = va_arg(ap, int);
                         data = &buffer.b;
@@ -1048,7 +1058,7 @@ int table_add_many_internal(Table *t, TableDataType first_type, ...) {
                         return 0;
 
                 default:
-                        assert_not_reached("Uh? Unexpected data type.");
+                        assert_not_reached();
                 }
 
                 r = table_add_cell(t, &last_cell, type, data);
@@ -1435,6 +1445,9 @@ static const char *table_data_format(Table *t, TableData *d, bool avoid_uppercas
         case TABLE_BOOLEAN:
                 return yes_no(d->boolean);
 
+        case TABLE_BOOLEAN_CHECKMARK:
+                return special_glyph(d->boolean ? SPECIAL_GLYPH_CHECK_MARK : SPECIAL_GLYPH_CROSS_MARK);
+
         case TABLE_TIMESTAMP:
         case TABLE_TIMESTAMP_UTC:
         case TABLE_TIMESTAMP_RELATIVE: {
@@ -1652,16 +1665,9 @@ static const char *table_data_format(Table *t, TableData *d, bool avoid_uppercas
 
         case TABLE_IFINDEX: {
                 _cleanup_free_ char *p = NULL;
-                char name[IF_NAMESIZE + 1];
 
-                if (format_ifname(d->ifindex, name)) {
-                        p = strdup(name);
-                        if (!p)
-                                return NULL;
-                } else {
-                        if (asprintf(&p, "%i" , d->ifindex) < 0)
-                                return NULL;
-                }
+                if (format_ifname_full_alloc(d->ifindex, FORMAT_IFNAME_IFINDEX, &p) < 0)
+                        return NULL;
 
                 d->formatted = TAKE_PTR(p);
                 break;
@@ -1778,7 +1784,7 @@ static const char *table_data_format(Table *t, TableData *d, bool avoid_uppercas
         }
 
         default:
-                assert_not_reached("Unexpected type?");
+                assert_not_reached();
         }
 
         return d->formatted;
@@ -2480,6 +2486,7 @@ static int table_data_to_json(TableData *d, JsonVariant **ret) {
         case TABLE_STRV_WRAPPED:
                 return json_variant_new_array_strv(ret, d->strv);
 
+        case TABLE_BOOLEAN_CHECKMARK:
         case TABLE_BOOLEAN:
                 return json_variant_new_boolean(ret, d->boolean);
 
@@ -2551,15 +2558,11 @@ static int table_data_to_json(TableData *d, JsonVariant **ret) {
         case TABLE_IN6_ADDR:
                 return json_variant_new_array_bytes(ret, &d->address, FAMILY_ADDRESS_SIZE(AF_INET6));
 
-        case TABLE_ID128: {
-                char buf[SD_ID128_STRING_MAX];
-                return json_variant_new_string(ret, sd_id128_to_string(d->id128, buf));
-        }
+        case TABLE_ID128:
+                return json_variant_new_string(ret, SD_ID128_TO_STRING(d->id128));
 
-        case TABLE_UUID: {
-                char buf[ID128_UUID_STRING_MAX];
-                return json_variant_new_string(ret, id128_to_uuid_string(d->id128, buf));
-        }
+        case TABLE_UUID:
+                return json_variant_new_string(ret, ID128_TO_UUID_STRING(d->id128));
 
         case TABLE_UID:
                 if (!uid_is_valid(d->uid))
@@ -2612,6 +2615,12 @@ static char* string_to_json_field_name(const char *f) {
         return c;
 }
 
+static const char *table_get_json_field_name(Table *t, size_t column) {
+        assert(t);
+
+        return column < t->n_json_fields ? t->json_fields[column] : NULL;
+}
+
 int table_to_json(Table *t, JsonVariant **ret) {
         JsonVariant **rows = NULL, **elements = NULL;
         _cleanup_free_ size_t *sorted = NULL;
@@ -2655,26 +2664,36 @@ int table_to_json(Table *t, JsonVariant **ret) {
 
         for (size_t j = 0; j < display_columns; j++) {
                 _cleanup_free_ char *mangled = NULL;
-                const char *formatted;
-                TableData *d;
+                const char *n;
+                size_t c;
 
-                assert_se(d = t->data[t->display_map ? t->display_map[j] : j]);
+                c = t->display_map ? t->display_map[j] : j;
 
-                /* Field names must be strings, hence format whatever we got here as a string first */
-                formatted = table_data_format(t, d, true, SIZE_MAX, NULL);
-                if (!formatted) {
-                        r = -ENOMEM;
-                        goto finish;
+                /* Use explicitly set JSON field name, if we have one. Otherwise mangle the column field value. */
+                n = table_get_json_field_name(t, c);
+                if (!n) {
+                        const char *formatted;
+                        TableData *d;
+
+                        assert_se(d = t->data[c]);
+
+                        /* Field names must be strings, hence format whatever we got here as a string first */
+                        formatted = table_data_format(t, d, true, SIZE_MAX, NULL);
+                        if (!formatted) {
+                                r = -ENOMEM;
+                                goto finish;
+                        }
+
+                        /* Arbitrary strings suck as field names, try to mangle them into something more suitable hence */
+                        mangled = string_to_json_field_name(formatted);
+                        if (!mangled) {
+                                r = -ENOMEM;
+                                goto finish;
+                        }
+                        n = mangled;
                 }
 
-                /* Arbitrary strings suck as field names, try to mangle them into something more suitable hence */
-                mangled = string_to_json_field_name(formatted);
-                if (!mangled) {
-                        r = -ENOMEM;
-                        goto finish;
-                }
-
-                r = json_variant_new_string(elements + j*2, mangled);
+                r = json_variant_new_string(elements + j*2, n);
                 if (r < 0)
                         goto finish;
         }
@@ -2774,4 +2793,31 @@ int table_print_with_pager(
                 return table_log_print_error(r);
 
         return 0;
+}
+
+int table_set_json_field_name(Table *t, size_t column, const char *name) {
+        int r;
+
+        assert(t);
+
+        if (name) {
+                size_t m;
+
+                m = MAX(column + 1, t->n_json_fields);
+                if (!GREEDY_REALLOC0(t->json_fields, m))
+                        return -ENOMEM;
+
+                r = free_and_strdup(t->json_fields + column, name);
+                if (r < 0)
+                        return r;
+
+                t->n_json_fields = m;
+                return r;
+        } else {
+                if (column >= t->n_json_fields)
+                        return 0;
+
+                t->json_fields[column] = mfree(t->json_fields[column]);
+                return 1;
+        }
 }

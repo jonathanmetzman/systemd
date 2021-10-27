@@ -278,10 +278,9 @@ static int fscrypt_setup(
         return log_error_errno(SYNTHETIC_ERRNO(ENOKEY), "Failed to set up home directory with provided passwords.");
 }
 
-int home_prepare_fscrypt(
+int home_setup_fscrypt(
                 UserRecord *h,
-                bool already_activated,
-                PasswordCache *cache,
+                const PasswordCache *cache,
                 HomeSetup *setup) {
 
         _cleanup_(erase_and_freep) void *volume_key = NULL;
@@ -585,7 +584,7 @@ int home_create_fscrypt(
 int home_passwd_fscrypt(
                 UserRecord *h,
                 HomeSetup *setup,
-                PasswordCache *cache,               /* the passwords acquired via PKCS#11/FIDO2 security tokens */
+                const PasswordCache *cache,         /* the passwords acquired via PKCS#11/FIDO2 security tokens */
                 char **effective_passwords          /* new passwords */) {
 
         _cleanup_(erase_and_freep) void *volume_key = NULL;

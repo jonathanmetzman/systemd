@@ -922,8 +922,13 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
+
+        /* If we are in --user mode, there's no point in talking to PolicyKit or the infra to query system
+         * passwords */
+        if (arg_scope != UNIT_FILE_SYSTEM)
+                arg_ask_password = false;
 
         if (arg_transport == BUS_TRANSPORT_REMOTE && arg_scope != UNIT_FILE_SYSTEM)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
@@ -1184,7 +1189,7 @@ static int run(int argc, char *argv[]) {
 
         case _ACTION_INVALID:
         default:
-                assert_not_reached("Unknown action");
+                assert_not_reached();
         }
 
 finish:

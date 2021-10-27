@@ -198,7 +198,11 @@ sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:*:svnDefaul
 sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvrP02A_C106.60E:*:svnDefaultstring:pnDefaultstring:*
  ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
 
-# Chuwi Hi10 Pro
+# Chuwi Hi10 Plus (CWI527)
+sensor:modalias:acpi:BOSC0200*:dmi:*:svnCHUWIINNOVATIONANDTECHNOLOGY*:pnHi10plustablet:*
+ ACCEL_MOUNT_MATRIX=1, 0, 0; 0, -1, 0; 0, 0, 1
+
+# Chuwi Hi10 Pro (CWI529)
 sensor:modalias:acpi:BOSC0200*:dmi:*:svn*CHUWIINNOVATIONANDTECHNOLOGY*:pnHi10protablet:*
  ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
 
@@ -226,8 +230,9 @@ sensor:modalias:acpi:BOSC0200*:dmi:*:svnChuwi*:pnHi13:*
 # Chuwi HiBook does not have its product name filled, so we
 # match the entire dmi-alias, assuming that the use of a BOSC0200 +
 # bios-version + bios-date combo is unique
-sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd05/07/2016:svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnHampoo:rnCherryTrailCR:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
-sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd05/28/2016:svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnHampoo:rnCherryTrailCR:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
+# '*' in ":*svn" is there because kernels >= 5.8 have inserted a br field there
+sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd05/07/2016:*svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnHampoo:rnCherryTrailCR:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
+sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd05/28/2016:*svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnHampoo:rnCherryTrailCR:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
  ACCEL_MOUNT_MATRIX=1, 0, 0; 0, -1, 0; 0, 0, 1
 
 # Chuwi HiBook Pro (CWI526)
@@ -237,7 +242,12 @@ sensor:modalias:acpi:BOSC0200*:dmi:*:svnHampoo*:pnP1D6_C109K:*
 # Chuwi CoreBook
 # Chuwi CoreBook does not have its product name filled, so we
 # match the entire dmi-alias
-sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvrY13D_KB133.103:bd06/01/2018:svnHampoo:pnDefaultstring:pvrV100:rvnHampoo:rnY13D_KB133:rvrV100:cvnDefaultstring:ct9:cvrDefaultstring:*
+# '*' in ":*svn" is there because kernels >= 5.8 have inserted a br field there
+sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvrY13D_KB133.103:bd06/01/2018:*svnHampoo:pnDefaultstring:pvrV100:rvnHampoo:rnY13D_KB133:rvrV100:cvnDefaultstring:ct9:cvrDefaultstring:*
+ ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, 1, 0; 0, 0, 1
+
+# Chuwi SurBook Mini (CWI540)
+sensor:modalias:acpi:BOSC0200*:dmi:*:svnHampoo*:pnC3W6_AP108_4GB:*
  ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, 1, 0; 0, 0, 1
 
 #########################################
@@ -278,6 +288,14 @@ sensor:modalias:acpi:KIOX000A*:dmi:*:svnALLDOCUBE:pni1102:*
  ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, 1, 0; 0, 0, 1
 
 #########################################
+# Cyberbook
+#########################################
+
+# Cyberbook T116
+sensor:modalias:acpi:KIOX000A*:dmi:*:rvnDefaultstring:rnCherryTrailCR:*:sku20170531:*
+ ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, 1, 0; 0, 0, 1
+
+#########################################
 # Cytrix (Mytrix)
 #########################################
 sensor:modalias:acpi:*KIOX000A*:dmi:*svn*CytrixTechnology:*pn*Complex11t:*
@@ -287,12 +305,12 @@ sensor:modalias:acpi:*KIOX000A*:dmi:*svn*CytrixTechnology:*pn*Complex11t:*
 # Dell
 #########################################
 sensor:modalias:platform:HID-SENSOR-200073:dmi:*svnDell*:pnVostro5581:*
- ACCEL_LOCATION=base
-
+sensor:modalias:platform:HID-SENSOR-200073:dmi:*svnDell*:sku0A36:*
 sensor:modalias:platform:HID-SENSOR-200073:dmi:*svnDell*:sku0A3E:*
- ACCEL_LOCATION=base
-
+sensor:modalias:platform:HID-SENSOR-200073:dmi:*svnDell*:sku0B09:*
 sensor:modalias:platform:HID-SENSOR-200073:dmi:*svnDell*:sku0B0B:*
+sensor:modalias:platform:HID-SENSOR-200073:dmi:*svnDell*:sku0B0D:*
+sensor:modalias:platform:HID-SENSOR-200073:dmi:*svnDell*:sku0B11:*
  ACCEL_LOCATION=base
 
 # Dell Venue 8 Pro 3845
@@ -394,14 +412,25 @@ sensor:modalias:acpi:KIOX000A*:dmi:bvnINSYDECorp.:bvrBYT70A.YNCHENG.WIN.007:*:sv
 # and no other devices have both board_name *and* product_name set to
 # "Default string". So combined with the sensor modalias and BIOS date this
 # should be unique enough to identify the GPDwin
-sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd10/25/2016:svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
-sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd11/18/2016:svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
-sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd12/23/2016:svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
-sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd12/26/2016:svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
-sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd02/21/2017:svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
-sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd03/20/2017:svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
-sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd05/25/2017:svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
+# '*' in ":*svn" is there because kernels >= 5.8 have inserted a br field there
+sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd10/25/2016:*svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
+sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd11/18/2016:*svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
+sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd12/23/2016:*svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
+sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd12/26/2016:*svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
+sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd02/21/2017:*svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
+sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd03/20/2017:*svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
+sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd05/25/2017:*svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnAMICorporation:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
  ACCEL_LOCATION=base
+
+#########################################
+# Hometech
+########################################
+
+# Nobody bothered to use Linux on any device of this manufacturer
+# so current marks might be too general and need fixes.
+# These values are based on Wi101 model.
+sensor:modalias:acpi:BMA250E*:dmi:*:svnInsyde*:pni101c:*
+ ACCEL_MOUNT_MATRIX=0,1,0;-1,0,0;-1,0,0
 
 #########################################
 # HP
@@ -509,6 +538,10 @@ sensor:modalias:acpi:BOSC0200*:dmi:*ThinkPadYoga11e3rdGen:*
 
 sensor:modalias:acpi:BOSC0200*:dmi:*:svnLENOVO:*pvrThinkPadYoga11e4thGen:*
  ACCEL_MOUNT_MATRIX=0, 1, 0; -1, 0, 0; 0, 0, -1
+
+# Lenovo ThinkPad Yoga 11e 5th Gen (20LN-S14900)
+sensor:modalias:acpi:BOSC0200*:dmi:*pvrThinkPadYoga11e5thGen:*
+ ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, 1, 0; 0, 0, -1
 
 # Miix3-1030
 sensor:modalias:acpi:BMA250E*:dmi:bvnLENOVO:*:pvrLenovoMIIX3-1030:*
@@ -674,7 +707,8 @@ sensor:modalias:acpi:BMA250E*:dmi:bvnINSYDECorp.:bvrONDA.W89*:svnInsyde:pnONDATa
  ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
 
 # Onda v975w, generic DMI strings, match entire dmi modalias inc. bios-date
-sensor:modalias:acpi:SMO8500*:dmi:bvnAmericanMegatrendsInc.:bvr5.6.5:bd07/25/2014:svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnAptioCRB:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
+# '*' in ":*svn" is there because kernels >= 5.8 have inserted a br field there
+sensor:modalias:acpi:SMO8500*:dmi:bvnAmericanMegatrendsInc.:bvr5.6.5:bd07/25/2014:*svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnAptioCRB:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
  ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
 
 #########################################
@@ -683,7 +717,8 @@ sensor:modalias:acpi:SMO8500*:dmi:bvnAmericanMegatrendsInc.:bvr5.6.5:bd07/25/201
 
 # One-netbook OneMix 2s
 # OneMix 2s has no product name filled, matching entire dmi-alias
-sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvr5.12:bd10/26/2018:br5.12:svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnDefaultstring:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
+# '*' in ":*svn" is there because kernels >= 5.8 have inserted a br field there
+sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvr5.12:bd10/26/2018:*svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnDefaultstring:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
  ACCEL_MOUNT_MATRIX=0, 1, 0; 1, 0, 0; 0, 0, 1
 
 # One-netbook OneMix 3 Pro
@@ -692,7 +727,8 @@ sensor:modalias:acpi:BOSC0200*:dmi:*svnONE-NETBOOKTECHNOLOGYCO*:pnOne-Mix3Pro:*
 
 # One-netbook OneMix 3s
 # OneMix 3s has no product name filled, matching entire dmi-alias
-sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvr5.12:bd07/17/2019:br5.12:svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnDefaultstring:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
+# '*' in ":*svn" is there because kernels >= 5.8 have inserted a br field there
+sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvr5.12:bd07/17/2019:*svnDefaultstring:pnDefaultstring:pvrDefaultstring:rvnDefaultstring:rnDefaultstring:rvrDefaultstring:cvnDefaultstring:ct3:cvrDefaultstring:*
  ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, 1, 0; 0, 0, 1
 
 #########################################
@@ -724,8 +760,9 @@ sensor:modalias:acpi:BMA250E*:dmi:*:svnShenzhenPLOYER*:pnMOMO7W:*
 # The Point of View TAB-P800W does not have its product name filled, so we
 # match the entire dmi-alias, assuming that the use of a BMA250E +
 # bios-version + bios-date combo is unique
-sensor:modalias:acpi:BMA250E*:dmi:bvnAmericanMegatrendsInc.:bvr3BAIR1013:bd08/22/2014:svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnAptioCRB:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
-sensor:modalias:acpi:BMA250E*:dmi:bvnAmericanMegatrendsInc.:bvr3BAIR1014:bd10/24/2014:svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnAptioCRB:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
+# '*' in ":*svn" is there because kernels >= 5.8 have inserted a br field there
+sensor:modalias:acpi:BMA250E*:dmi:bvnAmericanMegatrendsInc.:bvr3BAIR1013:bd08/22/2014:*svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnAptioCRB:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
+sensor:modalias:acpi:BMA250E*:dmi:bvnAmericanMegatrendsInc.:bvr3BAIR1014:bd10/24/2014:*svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnAptioCRB:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
  ACCEL_MOUNT_MATRIX=0, 1, 0; 1, 0, 0; 0, 0, 1
 
 # Point of View TAB-P1005W-232 (v2.0)
@@ -803,7 +840,8 @@ sensor:modalias:acpi:SMO8500*:dmi:*bd12/19/2014:*:rvnTECLAST:rntPAD:*
  ACCEL_MOUNT_MATRIX=1, 0, 0; 0, -1, 0; 0, 0, 1
 
 # Teclast X98 Plus I (A5C6), generic DMI strings, match entire dmi modalias inc. bios-date
-sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.011:bd11/03/2015:svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnCherryTrailCR:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
+# '*' in ":*svn" is there because kernels >= 5.8 have inserted a br field there
+sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.011:bd11/03/2015:*svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnCherryTrailCR:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
  ACCEL_MOUNT_MATRIX=0, 1, 0; 1, 0, 0; 0, 0, 1
 
 # Teclast X98 Plus II
@@ -815,7 +853,8 @@ sensor:modalias:acpi:KIOX000A*:dmi:*:svnTECLAST:pnX98PlusII:*
 #########################################
 
 # Thundersoft TST168 tablet, generic DMI strings, match entire dmi modalias inc. bios-date
-sensor:modalias:acpi:BMA250E*:dmi:bvnAmericanMegatrendsInc.:bvr5.6.5:bd04/15/2014:svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnAptioCRB:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
+# '*' in ":*svn" is there because kernels >= 5.8 have inserted a br field there
+sensor:modalias:acpi:BMA250E*:dmi:bvnAmericanMegatrendsInc.:bvr5.6.5:bd04/15/2014:*svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnAptioCRB:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
  ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, 1, 0; 0, 0, 1
 
 #########################################
@@ -847,7 +886,6 @@ sensor:modalias:acpi:KIOX000A*:dmi:*:svnTrekStor:pnSurfTabtwin10.1:*
 sensor:modalias:acpi:KIOX000A*:dmi:*:svnTREKSTOR*:pnPrimetabS11B:*
 sensor:modalias:acpi:KIOX000A*:dmi:*:svnTREKSTOR:pnPrimetabT13B:*
 sensor:modalias:acpi:BOSC0200*:dmi:*:svnTrekStor*:pnSurfTabtwin11.6:*
-sensor:modalias:acpi:BOSC0200*:dmi:*:svnTrekStor*:pnSurfTabduoW110.1(VT4):*
  ACCEL_MOUNT_MATRIX=1, 0, 0; 0, -1, 0; 0, 0, 1
 
 # alternative version of Trekstor's SurfTab Twin 11.6
@@ -884,7 +922,8 @@ sensor:modalias:acpi:SMO8500*:dmi:*:svnUMAX:pnVisionBook10WiPlus:*
 # The Winpad A15 does not have its product name filled, so we
 # match the entire dmi-alias, assuming that the use of a SMO8500 +
 # bios-version + bios-date combo is unique
-sensor:modalias:acpi:SMO8500*:dmi:bvnAmericanMegatrendsInc.:bvr5.6.5:bd11/20/2014:br5.6:svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnAptioCRB:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
+# '*' in ":*svn" is there because kernels >= 5.8 have inserted a br field there
+sensor:modalias:acpi:SMO8500*:dmi:bvnAmericanMegatrendsInc.:bvr5.6.5:bd11/20/2014:*svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnAptioCRB:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:*
  ACCEL_MOUNT_MATRIX=0, -1, 0; 1, 0, 0; 0, 0, -1
 
 #########################################

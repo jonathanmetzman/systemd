@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <getopt.h>
+#include <unistd.h>
 
 #include "creds-util.h"
 #include "dirent-util.h"
@@ -232,7 +233,7 @@ static int transcode(
                 return r;
 
         default:
-                assert_not_reached("Unexpected transcoding mode");
+                assert_not_reached();
         }
 }
 
@@ -761,7 +762,7 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
         }
 

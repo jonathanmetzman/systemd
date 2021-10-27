@@ -662,7 +662,7 @@ static int create_remoteserver(
                         else
                                 url = strjoina(arg_url, "/entries");
                 } else
-                        url = strdupa(arg_url);
+                        url = strdupa_safe(arg_url);
 
                 log_info("Spawning curl %s...", url);
                 fd = spawn_curl(url);
@@ -673,7 +673,7 @@ static int create_remoteserver(
                 if (!hostname)
                         hostname = arg_url;
 
-                hostname = strndupa(hostname, strcspn(hostname, "/:"));
+                hostname = strndupa_safe(hostname, strcspn(hostname, "/:"));
 
                 r = journal_remote_add_source(s, fd, (char *) hostname, false);
                 if (r < 0)
@@ -1003,7 +1003,7 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unknown option code.");
+                        assert_not_reached();
                 }
 
         if (optind < argc)
@@ -1099,7 +1099,7 @@ static int load_certificates(char **key, char **cert, char **trust) {
 
 static int run(int argc, char **argv) {
         _cleanup_(journal_remote_server_destroy) RemoteServer s = {};
-        _cleanup_(notify_on_cleanup) const char *notify_message = NULL;
+        _unused_ _cleanup_(notify_on_cleanup) const char *notify_message = NULL;
         _cleanup_(erase_and_freep) char *key = NULL;
         _cleanup_free_ char *cert = NULL, *trust = NULL;
         int r;
