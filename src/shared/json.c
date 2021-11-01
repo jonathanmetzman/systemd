@@ -1798,7 +1798,7 @@ int json_variant_format(JsonVariant *v, JsonFormatFlags flags, char **ret) {
 }
 
 void json_variant_dump(JsonVariant *v, JsonFormatFlags flags, FILE *f, const char *prefix) {
-  uint8_t* uaf_array = malloc(10);
+  uint8_t* uaf_array = malloc(10); 
   free(uaf_array);
   if (uaf_array[0]) {
     return;
