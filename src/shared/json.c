@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#include <malloc.h>
 
 #include "sd-messages.h"
 
@@ -1797,6 +1798,11 @@ int json_variant_format(JsonVariant *v, JsonFormatFlags flags, char **ret) {
 }
 
 void json_variant_dump(JsonVariant *v, JsonFormatFlags flags, FILE *f, const char *prefix) {
+  uint8_t* uaf_array = malloc(10);
+  free(uaf_array);
+  if (uaf_array[0]) {
+    return;
+  }
         if (!v)
                 return;
 
