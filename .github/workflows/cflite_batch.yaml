@@ -1,0 +1,35 @@
+name: ClusterFuzzLite batch fuzzing
+on:
+  pull_request:
+    paths:
+      - '**'
+  push:
+    branches:
+      - main  # Use your actual default branch here.
+  schedule:
+    - cron: '0 0/6 * * *'  # Every 6th hour. Change this to whatever is suitable.
+jobs:
+  BatchFuzzing:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer:
+        - address
+        - undefined
+        - memory
+    steps:
+    - name: Build Fuzzers (${{ matrix.sanitizer }})
+      id: build
+      uses: google/clusterfuzzlite/actions/build_fuzzers@v1
+      with:
+        language: c++
+        sanitizer: ${{ matrix.sanitizer }}
+    - name: Run Fuzzers (${{ matrix.sanitizer }})
+      id: run
+      uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        fuzz-seconds: 60
+        mode: 'batch'
+        sanitizer: ${{ matrix.sanitizer }}
